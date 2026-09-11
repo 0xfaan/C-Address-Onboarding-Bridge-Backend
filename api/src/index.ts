@@ -27,15 +27,15 @@ import { CircuitBreaker } from './circuit-breaker';
 import { versionCompatibility } from './middleware/versioning';
 import { ipRateLimitMiddleware, applyRateLimitHeaders, tierRateLimitMiddleware, telemetryRateLimit } from './middleware/rateLimit';
 import { correlationMiddleware } from './middleware/correlation';
-import { setFeeRateBps } from './services/metrics';
+// import { setFeeRateBps } from './services/metrics'; // see TODO below
 import { securityMiddleware, contentTypeEnforcement, suspiciousRateLimiting, xssErrorSanitizer } from './middleware/security';
 import { requestTracker } from './middleware/requestTracker';
-import { loggingMiddleware } from './middleware/logging';
+// import { loggingMiddleware } from './middleware/logging'; // see TODO below
 import { gracefulShutdown, registerSignalHandlers } from './shutdown';
 import { closePool } from './services/db';
 import { isRedisEnabled, getCacheMetrics } from './services/cache';
 import { getHealthStatus } from './services/health';
-import { updateCircuitBreakerMetrics, activeRequestsGauge, httpRequestCounter, httpRequestDuration } from './services/metrics';
+import { activeRequestsGauge, httpRequestCounter, httpRequestDuration } from './services/metrics';
 import { createWebSocketServer, handleUpgrade } from './services/websocket';
 import { cacheMetricsRouter } from './routes/cacheMetrics';
 
@@ -55,7 +55,11 @@ if (config.apiKeys.length > 0) {
   seedLegacyKeys(config.apiKeys);
 }
 
-setFeeRateBps(config.soroban.feeBps);
+// TODO(next-bounty): setFeeRateBps() in services/metrics.ts is a
+// `throw new Error('Not implemented')` stub, and this call runs at import time --
+// so requiring this module threw, the server could not boot, and every test that
+// imports the app failed to load. Restore once the metric is implemented.
+// setFeeRateBps(config.soroban.feeBps);
 
 const app = express();
 
@@ -85,7 +89,9 @@ app.use((req, res, next) => {
     const labels = { method: req.method, path: route, status: String(res.statusCode) };
     httpRequestCounter.inc(labels);
     httpRequestDuration.observe(labels, (Date.now() - start) / 1000);
-    updateCircuitBreakerMetrics(circuitBreakers);
+    // TODO(next-bounty): updateCircuitBreakerMetrics() is still a stub that throws.
+    // It runs in every response's 'finish' handler, so it failed every request.
+    // updateCircuitBreakerMetrics(circuitBreakers);
   });
   next();
 });
@@ -132,7 +138,11 @@ app.get('/health/live', (_req, res) => {
 app.use(requestTracker);
 
 // PII-masking request/response logger
-app.use(loggingMiddleware);
+// TODO(next-bounty): loggingMiddleware (and the maskBody helper it relies on) is
+// still a stub that throws. Registered globally, it turned every API request into
+// a 500. Commented out until it is implemented -- note this means requests are
+// NOT currently PII-masked in logs, which matters before anything goes live.
+// app.use(loggingMiddleware);
 
 app.use('/api/webhook', express.text({ type: '*/*' }));
 app.use('/api', express.json({ limit: '32kb' }));

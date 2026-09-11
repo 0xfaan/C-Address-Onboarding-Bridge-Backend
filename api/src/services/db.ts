@@ -103,8 +103,8 @@ export async function dbHealthCheck(): Promise<{ ok: boolean; latencyMs?: number
 }
 
 export async function closePool(): Promise<void> {
-  if (_pool) {
-    await _pool.end();
-    _pool = null;
+  if (pool) {
+    await pool.end();
+    pool = null;
   }
 }

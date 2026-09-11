@@ -94,7 +94,8 @@ export class TransakService {
 
     if (!res.ok) throw new Error(`transak quote failed: ${res.statusText}`);
 
-    const data = await res.json();
+    // res.json() is untyped; the runtime guard below validates the shape.
+    const data = (await res.json()) as { response?: { quote?: Record<string, unknown> } } | null;
     const quoteData = data?.response?.quote;
 
     if (!quoteData || typeof quoteData.cryptoAmount !== 'number') {

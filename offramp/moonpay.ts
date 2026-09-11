@@ -76,7 +76,13 @@ export async function getMoonpayBuyQuote(config: MoonpayConfig, params: {
   baseCurrencyAmount: number;
   quoteCurrency: string;
 }): Promise<{
-  throw new Error('Not implemented: getMoonpayBuyQuote');
+  // Restored from d2a6c17^. The "seed learning exercises" stubbing pass wrote
+  // its `throw new Error('Not implemented')` into this *return type* instead of
+  // the function body -- a parse error that broke every test importing this
+  // module. The body below was already implemented and is untouched.
+  quoteCurrencyAmount: number;
+  feeAmount: number;
+  totalAmount: number;
 }> {
   const url = `https://api.moonpay.com/v3/currencies/${params.quoteCurrency}/buy_quote`;
   const query = new URLSearchParams({

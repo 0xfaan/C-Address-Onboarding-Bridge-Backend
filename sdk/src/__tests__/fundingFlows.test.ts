@@ -1,3 +1,16 @@
+// @ts-nocheck
+/**
+ * TODO(next-bounty): this whole file is written against a FundParams /
+ * FundingResult shape that does not exist. It expects `sourceAsset`, `id` and
+ * `txHash`; the real types in src/types.ts use different fields (`hash`, not
+ * `txHash`) and never had `sourceAsset` or `id`. The tests assert nothing about
+ * runtime behaviour either -- they only check that fields they invented are
+ * defined -- so they were passing against an API that was never built.
+ *
+ * Left in place, skipped, with @ts-nocheck so `tsc --noEmit` stays green.
+ * Decide what the funding API should actually look like, then rewrite these
+ * against it and remove both this banner and the `.skip` below.
+ */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { BridgeClient } from '../bridge';
 import type { FundParams, FundingResult } from '../types';
@@ -11,7 +24,7 @@ vi.mock('../telemetry', () => ({
   })),
 }));
 
-describe('SDK Funding Flows', () => {
+describe.skip('SDK Funding Flows', () => {
   let client: BridgeClient;
   let mockFetch: ReturnType<typeof vi.fn>;
 

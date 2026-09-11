@@ -182,7 +182,7 @@ pub struct Proposal {
 }
 
 /// #20: Batch analytics view returned by `get_stats`.
-/// 
+///
 /// **Warning**: When multiple token types are active, `total_volume` and `total_fees`
 /// become meaningless as they mix units from different tokens. Use
 /// `total_volume_for_token(token)` and `accumulated_fees_for_token(token)` instead
@@ -447,7 +447,7 @@ impl OnboardingBridge {
     }
 
     /// Returns the total unclaimed fees accumulated in the contract (stroops).
-    /// 
+    ///
     /// **⚠️ Warning**: When multiple token types are active, this value is a mixed-unit sum
     /// and becomes meaningless. Use `accumulated_fees_for_token(token)` for per-token metrics.
     pub fn accumulated_fees(env: Env) -> i128 {
@@ -553,7 +553,10 @@ impl OnboardingBridge {
         assert!(amount >= min_amt, "amount below minimum");
         assert!(amount <= max_amt, "amount above maximum");
         // Guard: amount must not overflow the fee multiplication.
-        assert!(amount <= MAX_SAFE_AMOUNT, "amount too large: would overflow fee calculation");
+        assert!(
+            amount <= MAX_SAFE_AMOUNT,
+            "amount too large: would overflow fee calculation"
+        );
 
         let fee_bps: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
         let discount = rebate_bps(env, source);
@@ -633,11 +636,7 @@ impl OnboardingBridge {
 
         // Track per-token volume separately for meaningful multi-token analytics
         let token_vol_key = DataKey::TotalVolumeByToken(token_address.clone());
-        let token_vol: i128 = env
-            .storage()
-            .instance()
-            .get(&token_vol_key)
-            .unwrap_or(0);
+        let token_vol: i128 = env.storage().instance().get(&token_vol_key).unwrap_or(0);
         env.storage()
             .instance()
             .set(&token_vol_key, &(token_vol + amount));
@@ -755,7 +754,7 @@ impl OnboardingBridge {
         let archive_count = if count > total { total } else { count };
         assert!(archive_count > 0, "{}", ERR_NO_ENTRIES_TO_ARCHIVE);
 
-        let mut hash_bytes = Bytes::new(&env);
+        let mut hash_bytes = Bytes::new(env);
         for i in 1..=archive_count {
             if let Some(mut record) = env
                 .storage()
@@ -1068,9 +1067,7 @@ impl OnboardingBridge {
                     threshold <= new_admins.len(),
                     "threshold exceeds admin count"
                 );
-                env.storage()
-                    .instance()
-                    .set(&DataKey::Admins, &new_admins);
+                env.storage().instance().set(&DataKey::Admins, &new_admins);
                 env.events().publish(
                     (Symbol::new(&env, "admins_rotated"),),
                     (new_admins.clone(),),
@@ -1097,6 +1094,8 @@ impl OnboardingBridge {
             }
             ProposalAction::ArchiveOldEntries(count) => {
                 Self::archive_old_entries_internal(&env, count);
+                0i128
+            }
             ProposalAction::SetRebateTier(tier_index, threshold, discount_bps) => {
                 assert!(discount_bps <= 5000, "discount capped at 50%");
                 assert!(tier_index < MAX_TIERS, "{}", ERR_TIER_CAP_EXCEEDED);

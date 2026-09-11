@@ -3,6 +3,11 @@ import crypto from 'crypto';
 export type AuditEventType =
   | 'transaction_submission'
   | 'transaction_submission_result'
+  // Emitted by src/routes/funding.ts. The call sites were added without the
+  // union being widened, so every one of them failed to typecheck.
+  | 'batch_transaction_submission_result'
+  | 'timelocked_transaction_submission_result'
+  | 'timelocked_claim_result'
   | 'fee_withdrawal'
   | 'admin_operation'
   | 'webhook_delivery';

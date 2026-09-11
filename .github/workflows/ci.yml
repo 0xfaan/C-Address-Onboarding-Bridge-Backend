@@ -45,6 +45,19 @@ jobs:
   api-server:
     name: API Server
     runs-on: ubuntu-latest
+    # src/__tests__/queue.test.ts drives real BullMQ queues, which need Redis.
+    # Without a Redis on localhost:6379 those 7 tests time out at 5s (they pass
+    # on any dev machine that has Redis running, which is why this was missed).
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     defaults:
       run:
         working-directory: api

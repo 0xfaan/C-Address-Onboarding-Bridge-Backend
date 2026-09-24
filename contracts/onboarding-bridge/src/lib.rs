@@ -104,10 +104,12 @@ pub enum DataKey {
     ProposalNonce,
     Proposal(u32),
     ProposalApproval(u32, Address),
+    ActiveProposalIds,
     NextPruneId,
     ReentrancyGuard,
     Funding(u32),
     FundingCount,
+    HotCount,
     ArchivedHash(u32),
     NextArchiveId,
     MinAmount,
@@ -325,9 +327,13 @@ impl OnboardingBridge {
             },
         );
         env.storage().instance().set(&DataKey::FundingCount, &0u32);
+        env.storage().instance().set(&DataKey::HotCount, &0u32);
         env.storage().instance().set(&DataKey::NextArchiveId, &0u32);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::ProposalNonce, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveProposalIds, &Vec::<u32>::new(&env));
         env.storage().instance().set(&DataKey::NextPruneId, &1u32);
         env.storage()
             .instance()
@@ -623,6 +629,14 @@ impl OnboardingBridge {
             .persistent()
             .extend_ttl(&DataKey::Funding(id), TTL_THRESHOLD, TTL_EXTEND);
         env.storage().instance().set(&DataKey::FundingCount, &id);
+        let hot_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::HotCount)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::HotCount, &(hot_count + 1));
 
         // #20: increment analytics counters atomically
         let total_vol: i128 = env
@@ -761,6 +775,16 @@ impl OnboardingBridge {
                 .persistent()
                 .get::<DataKey, FundingRecord>(&DataKey::Funding(i))
             {
+                if !record.archived {
+                    let hot_count: u32 = env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::HotCount)
+                        .unwrap_or(0);
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::HotCount, &hot_count.saturating_sub(1));
+                }
                 record.archived = true;
                 hash_bytes.append(&record.source.to_string().to_bytes());
                 hash_bytes.append(&record.target.to_string().to_bytes());
@@ -825,18 +849,11 @@ impl OnboardingBridge {
             .get(&DataKey::AccumulatedFees)
             .unwrap_or(0);
 
-        let mut hot_count: u32 = 0;
-        for i in 1..=funding_count {
-            if let Some(record) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, FundingRecord>(&DataKey::Funding(i))
-            {
-                if !record.archived {
-                    hot_count += 1;
-                }
-            }
-        }
+        let hot_count = env
+            .storage()
+            .instance()
+            .get(&DataKey::HotCount)
+            .unwrap_or(0);
 
         (funding_count, archived_count, accumulated_fees, hot_count)
     }
@@ -883,6 +900,15 @@ impl OnboardingBridge {
         env.storage()
             .instance()
             .set(&DataKey::ProposalNonce, &proposal_id);
+        let mut active_ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveProposalIds)
+            .unwrap_or(Vec::new(&env));
+        active_ids.push_back(proposal_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveProposalIds, &active_ids);
 
         env.events().publish(
             (Symbol::new(&env, "proposed"),),
@@ -977,6 +1003,22 @@ impl OnboardingBridge {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(proposal_id), &executed_proposal);
+        let mut active_ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveProposalIds)
+            .unwrap_or(Vec::new(&env));
+        let mut remaining_ids = Vec::new(&env);
+        for i in 0..active_ids.len() {
+            let id = active_ids.get_unchecked(i);
+            if id != proposal_id {
+                remaining_ids.push_back(id);
+            }
+        }
+        active_ids = remaining_ids;
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveProposalIds, &active_ids);
 
         let result = match proposal.action {
             ProposalAction::SetFee(new_fee_bps) => {
@@ -1137,25 +1179,31 @@ impl OnboardingBridge {
     }
 
     pub fn get_active_proposals(env: Env) -> Vec<Proposal> {
-        let nonce: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::ProposalNonce)
-            .unwrap_or(0);
         let current_block = env.ledger().sequence();
         let mut active: Vec<Proposal> = Vec::new(&env);
+        let mut active_ids = Vec::new(&env);
+        let proposal_ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveProposalIds)
+            .unwrap_or(Vec::new(&env));
 
-        for i in 1..=nonce {
+        for i in 0..proposal_ids.len() {
+            let proposal_id = proposal_ids.get_unchecked(i);
             if let Some(proposal) = env
                 .storage()
                 .instance()
-                .get::<DataKey, Proposal>(&DataKey::Proposal(i))
+                .get::<DataKey, Proposal>(&DataKey::Proposal(proposal_id))
             {
                 if !proposal.executed && current_block <= proposal.expiry {
                     active.push_back(proposal);
+                    active_ids.push_back(proposal_id);
                 }
             }
         }
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveProposalIds, &active_ids);
 
         active
     }

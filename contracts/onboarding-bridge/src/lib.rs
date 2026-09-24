@@ -59,10 +59,12 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 
-const INSTANCE_TTL_THRESHOLD: u32 = 5000;
-const INSTANCE_TTL_EXTEND: u32 = 50000;
-const PERSISTENT_TTL_THRESHOLD: u32 = 5000;
-const PERSISTENT_TTL_EXTEND: u32 = 50000;
+// At five seconds per ledger, retain contract configuration and records for
+// roughly 30 days before renewal, and renew them for roughly 90 days.
+const INSTANCE_TTL_THRESHOLD: u32 = 518_400;
+const INSTANCE_TTL_EXTEND: u32 = 1_555_200;
+const PERSISTENT_TTL_THRESHOLD: u32 = 518_400;
+const PERSISTENT_TTL_EXTEND: u32 = 1_555_200;
 const TTL_THRESHOLD: u32 = PERSISTENT_TTL_THRESHOLD;
 const TTL_EXTEND: u32 = PERSISTENT_TTL_EXTEND;
 /// Minimum ledgers that must elapse between `propose` and `execute` for
@@ -359,6 +361,7 @@ impl OnboardingBridge {
         env.storage()
             .instance()
             .set(&DataKey::UniqueFunderCount, &0u64);
+        Self::extend_ttl(&env);
 
         env.events().publish(
             (Symbol::new(&env, "initialize"),),
@@ -387,6 +390,7 @@ impl OnboardingBridge {
     }
 
     pub fn initialization_params(env: Env) -> InitializationParams {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::InitializationParams)
@@ -404,6 +408,7 @@ impl OnboardingBridge {
     }
 
     pub fn is_fee_token_whitelisted(env: Env, token_address: Address) -> bool {
+        Self::extend_ttl(&env);
         env.storage()
             .persistent()
             .get(&DataKey::FeeTokenWhitelist(token_address))
@@ -411,6 +416,7 @@ impl OnboardingBridge {
     }
 
     pub fn fee_token_rate(env: Env, token_address: Address) -> u32 {
+        Self::extend_ttl(&env);
         env.storage()
             .persistent()
             .get(&DataKey::FeeTokenRate(token_address))
@@ -418,6 +424,7 @@ impl OnboardingBridge {
     }
 
     pub fn accumulated_fees_for_token(env: Env, token_address: Address) -> i128 {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::AccumulatedFeesByToken(token_address))
@@ -427,6 +434,7 @@ impl OnboardingBridge {
     /// Returns the total volume funded for a specific token.
     /// Use this instead of accumulated_fees() when operating with multiple token types.
     pub fn total_volume_for_token(env: Env, token_address: Address) -> i128 {
+        Self::extend_ttl(&env);
         env.storage()
             .persistent()
             .get(&DataKey::TotalVolumeByToken(token_address))
@@ -434,6 +442,7 @@ impl OnboardingBridge {
     }
 
     pub fn max_fee_bps(env: Env) -> u32 {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::MaxFeeBps)
@@ -441,6 +450,7 @@ impl OnboardingBridge {
     }
 
     pub fn min_amount(env: Env) -> i128 {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::MinAmount)
@@ -448,6 +458,7 @@ impl OnboardingBridge {
     }
 
     pub fn max_amount(env: Env) -> i128 {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::MaxAmount)
@@ -455,6 +466,7 @@ impl OnboardingBridge {
     }
 
     pub fn user_volume(env: Env, user: Address) -> i128 {
+        Self::extend_ttl(&env);
         env.storage()
             .persistent()
             .get(&DataKey::UserVolume(user))
@@ -462,6 +474,7 @@ impl OnboardingBridge {
     }
 
     pub fn rebate_for(env: Env, user: Address) -> u32 {
+        Self::extend_ttl(&env);
         rebate_bps(&env, &user)
     }
 
@@ -478,6 +491,7 @@ impl OnboardingBridge {
     }
 
     pub fn is_paused(env: Env) -> bool {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::Paused)
@@ -485,6 +499,7 @@ impl OnboardingBridge {
     }
 
     pub fn get_admins(env: Env) -> Vec<Address> {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::Admins)
@@ -492,6 +507,7 @@ impl OnboardingBridge {
     }
 
     pub fn get_threshold(env: Env) -> u32 {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::Threshold)
@@ -500,6 +516,7 @@ impl OnboardingBridge {
 
     /// #20: Batch analytics view — returns all counters in one call.
     pub fn get_stats(env: Env) -> Stats {
+        Self::extend_ttl(&env);
         Stats {
             total_volume: env
                 .storage()
@@ -878,6 +895,7 @@ impl OnboardingBridge {
     }
 
     pub fn propose(env: Env, proposer: Address, action: ProposalAction, expiry_blocks: u32) -> u32 {
+        Self::extend_ttl(&env);
         proposer.require_auth();
 
         let admins: Vec<Address> = env
@@ -939,6 +957,7 @@ impl OnboardingBridge {
     }
 
     pub fn approve(env: Env, admin: Address, proposal_id: u32) {
+        Self::extend_ttl(&env);
         admin.require_auth();
 
         let admins: Vec<Address> = env
@@ -980,6 +999,7 @@ impl OnboardingBridge {
     }
 
     pub fn execute(env: Env, proposal_id: u32) -> i128 {
+        Self::extend_ttl(&env);
         let threshold: u32 = env
             .storage()
             .instance()

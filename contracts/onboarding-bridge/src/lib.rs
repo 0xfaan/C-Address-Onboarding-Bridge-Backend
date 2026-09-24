@@ -120,7 +120,7 @@ pub enum DataKey {
     NextArchiveId,
     MinAmount,
     MaxAmount,
-    UserVolume(Address),
+    UserVolume(Address, Address),
     TierThreshold(u32),
     TierDiscount(u32),
     TierCount,
@@ -207,11 +207,11 @@ pub struct Stats {
 #[contract]
 pub struct OnboardingBridge;
 
-fn rebate_bps(env: &Env, user: &Address) -> u32 {
+fn rebate_bps(env: &Env, user: &Address, token: &Address) -> u32 {
     let volume: i128 = env
         .storage()
         .persistent()
-        .get(&DataKey::UserVolume(user.clone()))
+        .get(&DataKey::UserVolume(user.clone(), token.clone()))
         .unwrap_or(0);
     let tier_count: u32 = env
         .storage()
@@ -465,17 +465,17 @@ impl OnboardingBridge {
             .unwrap_or(i128::MAX)
     }
 
-    pub fn user_volume(env: Env, user: Address) -> i128 {
+    pub fn user_volume(env: Env, user: Address, token: Address) -> i128 {
         Self::extend_ttl(&env);
         env.storage()
             .persistent()
-            .get(&DataKey::UserVolume(user))
+            .get(&DataKey::UserVolume(user, token))
             .unwrap_or(0)
     }
 
-    pub fn rebate_for(env: Env, user: Address) -> u32 {
+    pub fn rebate_for(env: Env, user: Address, token: Address) -> u32 {
         Self::extend_ttl(&env);
-        rebate_bps(&env, &user)
+        rebate_bps(&env, &user, &token)
     }
 
     /// Returns the total unclaimed fees accumulated in the contract (stroops).
@@ -595,7 +595,7 @@ impl OnboardingBridge {
         );
 
         let fee_bps: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
-        let discount = rebate_bps(env, source);
+        let discount = rebate_bps(env, source, token_address);
         let effective_fee_bps = fee_bps.saturating_sub(fee_bps * discount / 10000);
         let fee = if effective_fee_bps > 0 {
             (amount * effective_fee_bps as i128) / 10000
@@ -632,7 +632,7 @@ impl OnboardingBridge {
         }
         tk.transfer(&env.current_contract_address(), target, &net_amount);
 
-        let vol_key = DataKey::UserVolume(source.clone());
+        let vol_key = DataKey::UserVolume(source.clone(), token_address.clone());
         let vol: i128 = env.storage().persistent().get(&vol_key).unwrap_or(0);
         env.storage().persistent().set(&vol_key, &(vol + amount));
         Self::extend_persistent_ttl(env, &vol_key);

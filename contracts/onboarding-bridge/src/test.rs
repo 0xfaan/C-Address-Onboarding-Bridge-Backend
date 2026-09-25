@@ -4,7 +4,7 @@ extern crate std;
 
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     Address, Env, IntoVal, MuxedAddress, String, Symbol, Vec,
 };
 
@@ -405,6 +405,36 @@ fn test_stats_after_single_fund() {
     assert_eq!(s.total_fees, 10); // 1% of 1000
     assert_eq!(s.funding_count, 1);
     assert_eq!(s.unique_funder_count, 1);
+}
+
+#[test]
+fn test_funded_event_topics_include_source_target_and_token() {
+    let (env, bridge, token, _) = full_setup(100);
+    let source = Address::generate(&env);
+    let target = Address::generate(&env);
+    let memo = String::from_str(&env, "test");
+    TestTokenClient::new(&env, &token).mint(&source, &2000);
+
+    bridge.fund_c_address(&source, &target, &token, &1000, &memo);
+
+    let topics = Vec::from_array(
+        &env,
+        [
+            Symbol::new(&env, "funded").into_val(&env),
+            source.into_val(&env),
+            target.into_val(&env),
+            token.into_val(&env),
+        ],
+    );
+    let data = Vec::from_array(
+        &env,
+        [1000i128.into_val(&env), 10i128.into_val(&env), 0u32.into_val(&env)],
+    );
+
+    assert_eq!(
+        env.events().all(),
+        std::vec![(env.current_contract_address(), topics, data.into_val(&env))]
+    );
 }
 
 #[test]

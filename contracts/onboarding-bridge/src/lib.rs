@@ -51,12 +51,11 @@
 //! | `AutoWithdrawThreshold`| `i128`          | Auto-withdraw trigger level; 0 = off|
 
 #![no_std]
-#![allow(deprecated)]
 #![allow(clippy::needless_borrows_for_generic_args)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, crypto::Hash, token, Address, Bytes, BytesN, Env, String,
-    Symbol, Vec,
+    contract, contractevent, contractimpl, contracttype, crypto::Hash, token, Address, Bytes,
+    BytesN, Env, String, Vec,
 };
 
 const TTL_THRESHOLD: u32 = 5000;
@@ -82,6 +81,135 @@ const ERR_MISMATCHED_LENGTHS: &str = "batch input vectors must have same length"
 const ERR_NO_ENTRIES_TO_ARCHIVE: &str = "no entries to archive";
 const ERR_ADMIN_CANNOT_BE_CONTRACT: &str = "admin address cannot be the contract address";
 const ERR_TIER_CAP_EXCEEDED: &str = "tier count exceeds maximum allowed";
+
+#[contractevent(topics = ["initialize"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Initialized {
+    pub admins: Vec<Address>,
+    pub threshold: u32,
+    pub fee_bps: u32,
+    pub max_fee_bps: u32,
+    pub min_amount: i128,
+    pub max_amount: i128,
+}
+
+#[contractevent(topics = ["funded"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Funded {
+    #[topic]
+    pub source: Address,
+    #[topic]
+    pub target: Address,
+    #[topic]
+    pub token: Address,
+    pub amount: i128,
+    pub fee: i128,
+    pub discount: u32,
+}
+
+#[contractevent(topics = ["batch_funded"], data_format = "vec")]
+#[derive(Clone)]
+pub struct BatchFunded {
+    #[topic]
+    pub source: Address,
+    pub count: u32,
+    pub total_fees: i128,
+}
+
+#[contractevent(topics = ["archived"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Archived {
+    pub archive_count: u32,
+    pub hash: BytesN<32>,
+}
+
+#[contractevent(topics = ["proposed"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Proposed {
+    pub proposal_id: u32,
+    pub proposer: Address,
+    pub expiry: u32,
+}
+
+#[contractevent(topics = ["approved"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Approved {
+    pub proposal_id: u32,
+    pub admin: Address,
+    pub approval_count: u32,
+}
+
+#[contractevent(topics = ["set_fee"], data_format = "vec")]
+#[derive(Clone)]
+pub struct SetFee {
+    pub fee_bps: u32,
+}
+
+#[contractevent(topics = ["set_fee_token_whitelist"], data_format = "vec")]
+#[derive(Clone)]
+pub struct SetFeeTokenWhitelist {
+    #[topic]
+    pub token: Address,
+    pub enabled: bool,
+}
+
+#[contractevent(topics = ["set_fee_token_rate"], data_format = "vec")]
+#[derive(Clone)]
+pub struct SetFeeTokenRate {
+    #[topic]
+    pub token: Address,
+    pub rate: u32,
+}
+
+#[contractevent(topics = ["withdrawn"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Withdrawn {
+    pub to: Address,
+    #[topic]
+    pub token: Address,
+    pub amount: i128,
+}
+
+#[contractevent(topics = ["paused"])]
+#[derive(Clone)]
+pub struct Paused;
+
+#[contractevent(topics = ["unpaused"])]
+#[derive(Clone)]
+pub struct Unpaused;
+
+#[contractevent(topics = ["admins_rotated"], data_format = "vec")]
+#[derive(Clone)]
+pub struct AdminsRotated {
+    pub admins: Vec<Address>,
+}
+
+#[contractevent(topics = ["threshold_set"], data_format = "vec")]
+#[derive(Clone)]
+pub struct ThresholdSet {
+    pub threshold: u32,
+}
+
+#[contractevent(topics = ["tier_set"], data_format = "vec")]
+#[derive(Clone)]
+pub struct TierSet {
+    pub tier_index: u32,
+    pub threshold: i128,
+    pub discount_bps: u32,
+}
+
+#[contractevent(topics = ["executed"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Executed {
+    pub proposal_id: u32,
+}
+
+#[contractevent(topics = ["proposals_pruned"], data_format = "vec")]
+#[derive(Clone)]
+pub struct ProposalsPruned {
+    pub pruned: u32,
+    pub cursor: u32,
+}
 
 /// Storage keys used throughout the contract.
 ///
@@ -341,17 +469,15 @@ impl OnboardingBridge {
             .instance()
             .set(&DataKey::UniqueFunderCount, &0u64);
 
-        env.events().publish(
-            (Symbol::new(&env, "initialize"),),
-            (
-                admins,
-                threshold,
-                fee_bps,
-                max_fee_bps,
-                min_amount,
-                max_amount,
-            ),
-        );
+        Initialized {
+            admins,
+            threshold,
+            fee_bps,
+            max_fee_bps,
+            min_amount,
+            max_amount,
+        }
+        .publish(&env);
     }
 
     // -----------------------------------------------------------------------
@@ -654,10 +780,15 @@ impl OnboardingBridge {
                 .set(&DataKey::UniqueFunderCount, &(uc + 1));
         }
 
-        env.events().publish(
-            (Symbol::new(env, "funded"),),
-            (source.clone(), target.clone(), amount, fee, discount),
-        );
+        Funded {
+            source: source.clone(),
+            target: target.clone(),
+            token: token_address.clone(),
+            amount,
+            fee,
+            discount,
+        }
+        .publish(env);
 
         fee
     }
@@ -698,10 +829,12 @@ impl OnboardingBridge {
                 Self::fund_c_address_internal(&env, &source, &target, &token_addr, amount, &memo);
         }
 
-        env.events().publish(
-            (Symbol::new(&env, "batch_funded"),),
-            (source, count, total_fees),
-        );
+        BatchFunded {
+            source,
+            count,
+            total_fees,
+        }
+        .publish(&env);
 
         Self::clear_reentrancy_guard(&env);
         (total_fees, count)
@@ -796,10 +929,11 @@ impl OnboardingBridge {
             .instance()
             .set(&DataKey::NextArchiveId, &(archive_id + 1));
 
-        env.events().publish(
-            (Symbol::new(env, "archived"),),
-            (archive_count, hash_val.clone()),
-        );
+        Archived {
+            archive_count,
+            hash: hash_val.clone(),
+        }
+        .publish(env);
 
         hash_val
     }
@@ -884,10 +1018,12 @@ impl OnboardingBridge {
             .instance()
             .set(&DataKey::ProposalNonce, &proposal_id);
 
-        env.events().publish(
-            (Symbol::new(&env, "proposed"),),
-            (proposal_id, proposer, current_block + expiry_blocks),
-        );
+        Proposed {
+            proposal_id,
+            proposer,
+            expiry: current_block + expiry_blocks,
+        }
+        .publish(&env);
 
         proposal_id
     }
@@ -926,10 +1062,12 @@ impl OnboardingBridge {
             .instance()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
-        env.events().publish(
-            (Symbol::new(&env, "approved"),),
-            (proposal_id, admin, proposal.approval_count),
-        );
+        Approved {
+            proposal_id,
+            admin,
+            approval_count: proposal.approval_count,
+        }
+        .publish(&env);
     }
 
     pub fn execute(env: Env, proposal_id: u32) -> i128 {
@@ -998,18 +1136,17 @@ impl OnboardingBridge {
                     .instance()
                     .set(&DataKey::InitializationParams, &params);
 
-                env.events()
-                    .publish((Symbol::new(&env, "set_fee"),), (new_fee_bps,));
+                SetFee {
+                    fee_bps: new_fee_bps,
+                }
+                .publish(&env);
                 0i128
             }
             ProposalAction::SetFeeTokenWhitelist(token, enabled) => {
                 env.storage()
                     .instance()
                     .set(&DataKey::FeeTokenWhitelist(token.clone()), &enabled);
-                env.events().publish(
-                    (Symbol::new(&env, "set_fee_token_whitelist"),),
-                    (token, enabled),
-                );
+                SetFeeTokenWhitelist { token, enabled }.publish(&env);
                 0i128
             }
             ProposalAction::SetFeeTokenRate(token, rate) => {
@@ -1018,8 +1155,7 @@ impl OnboardingBridge {
                 env.storage()
                     .instance()
                     .set(&DataKey::FeeTokenRate(token.clone()), &rate);
-                env.events()
-                    .publish((Symbol::new(&env, "set_fee_token_rate"),), (token, rate));
+                SetFeeTokenRate { token, rate }.publish(&env);
                 0i128
             }
             ProposalAction::WithdrawFees(to, token, amount) => {
@@ -1039,20 +1175,22 @@ impl OnboardingBridge {
                     .set(&DataKey::AccumulatedFees, &remaining);
                 let tk = token::Client::new(&env, &token);
                 tk.transfer(&env.current_contract_address(), &to, &withdraw_amount);
-                env.events().publish(
-                    (Symbol::new(&env, "withdrawn"),),
-                    (to, token, withdraw_amount),
-                );
+                Withdrawn {
+                    to,
+                    token,
+                    amount: withdraw_amount,
+                }
+                .publish(&env);
                 withdraw_amount
             }
             ProposalAction::Pause => {
                 env.storage().instance().set(&DataKey::Paused, &true);
-                env.events().publish((Symbol::new(&env, "paused"),), ());
+                Paused.publish(&env);
                 0i128
             }
             ProposalAction::Unpause => {
                 env.storage().instance().set(&DataKey::Paused, &false);
-                env.events().publish((Symbol::new(&env, "unpaused"),), ());
+                Unpaused.publish(&env);
                 0i128
             }
             ProposalAction::RotateAdmins(new_admins) => {
@@ -1068,10 +1206,10 @@ impl OnboardingBridge {
                     "threshold exceeds admin count"
                 );
                 env.storage().instance().set(&DataKey::Admins, &new_admins);
-                env.events().publish(
-                    (Symbol::new(&env, "admins_rotated"),),
-                    (new_admins.clone(),),
-                );
+                AdminsRotated {
+                    admins: new_admins.clone(),
+                }
+                .publish(&env);
                 0i128
             }
             ProposalAction::SetThreshold(new_threshold) => {
@@ -1088,8 +1226,10 @@ impl OnboardingBridge {
                 env.storage()
                     .instance()
                     .set(&DataKey::Threshold, &new_threshold);
-                env.events()
-                    .publish((Symbol::new(&env, "threshold_set"),), (new_threshold,));
+                ThresholdSet {
+                    threshold: new_threshold,
+                }
+                .publish(&env);
                 0i128
             }
             ProposalAction::ArchiveOldEntries(count) => {
@@ -1115,16 +1255,17 @@ impl OnboardingBridge {
                         .instance()
                         .set(&DataKey::TierCount, &(tier_index + 1));
                 }
-                env.events().publish(
-                    (Symbol::new(&env, "tier_set"),),
-                    (tier_index, threshold, discount_bps),
-                );
+                TierSet {
+                    tier_index,
+                    threshold,
+                    discount_bps,
+                }
+                .publish(&env);
                 0i128
             }
         };
 
-        env.events()
-            .publish((Symbol::new(&env, "executed"),), (proposal_id,));
+        Executed { proposal_id }.publish(&env);
 
         result
     }
@@ -1235,8 +1376,7 @@ impl OnboardingBridge {
 
         env.storage().instance().set(&DataKey::NextPruneId, &cursor);
 
-        env.events()
-            .publish((Symbol::new(&env, "proposals_pruned"),), (pruned, cursor));
+        ProposalsPruned { pruned, cursor }.publish(&env);
 
         pruned
     }

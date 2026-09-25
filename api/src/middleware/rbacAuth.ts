@@ -136,7 +136,15 @@ export function updateApiKey(
 ): boolean {
   const record = keyStore.get(id);
   if (!record) return false;
-  Object.assign(record, patch, { updatedAt: Date.now() });
+  // Types are erased at runtime: apply only the updatable fields so a caller
+  // can never overwrite id, keyHash, revoked, etc. Undefined values are
+  // ignored and arrays are copied so later mutation of the patch has no effect.
+  if (patch.name !== undefined) record.name = patch.name;
+  if (patch.scopes !== undefined) record.scopes = [...patch.scopes];
+  if (patch.ipWhitelist !== undefined) record.ipWhitelist = [...patch.ipWhitelist];
+  if (patch.expiresAt !== undefined) record.expiresAt = patch.expiresAt;
+  if (patch.rateLimit !== undefined) record.rateLimit = patch.rateLimit;
+  record.updatedAt = Date.now();
   return true;
 }
 

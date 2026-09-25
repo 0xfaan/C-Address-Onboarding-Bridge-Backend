@@ -61,11 +61,11 @@ use soroban_sdk::{
 
 const TTL_THRESHOLD: u32 = 5000;
 const TTL_EXTEND: u32 = 50000;
-/// Minimum ledgers that must elapse between `propose` and `execute` for
-/// sensitive actions (WithdrawFees, SetFee, Pause). Prevents a single admin
-/// with threshold == 1 from proposing and immediately executing with no
-/// transparency window.
-const MIN_EXEC_DELAY: u32 = 10;
+/// Default minimum ledgers that must elapse between `propose` and `execute`
+/// for sensitive actions. At Stellar's five-second ledger cadence this is one
+/// hour, providing an observable review window even for a single-admin setup.
+/// Deployments that need a longer window may use `initialize_with_delay`.
+const MIN_EXEC_DELAY: u32 = 720;
 /// Maximum amount that can be passed to fund_c_address. Ensures the fee
 /// multiplication `amount * effective_fee_bps` never overflows i128.
 /// i128::MAX / 10_000 ≈ 1.7 × 10^34, far above any realistic token amount.
@@ -110,6 +110,8 @@ pub enum DataKey {
     FundingCount,
     ArchivedHash(u32),
     NextArchiveId,
+    NextArchiveRecordId,
+    ExecutionDelay,
     MinAmount,
     MaxAmount,
     UserVolume(Address),
@@ -290,6 +292,30 @@ impl OnboardingBridge {
         min_amount: i128,
         max_amount: i128,
     ) {
+        Self::initialize_with_delay(
+            env,
+            admins,
+            threshold,
+            fee_bps,
+            max_fee_bps,
+            min_amount,
+            max_amount,
+            MIN_EXEC_DELAY,
+        );
+    }
+
+    /// Initialize the bridge with an explicit governance execution delay.
+    /// The delay is measured in ledgers (approximately five seconds each).
+    pub fn initialize_with_delay(
+        env: Env,
+        admins: Vec<Address>,
+        threshold: u32,
+        fee_bps: u32,
+        max_fee_bps: u32,
+        min_amount: i128,
+        max_amount: i128,
+        execution_delay: u32,
+    ) {
         if env.storage().instance().has(&DataKey::Version) {
             return;
         }
@@ -300,6 +326,7 @@ impl OnboardingBridge {
         assert!(fee_bps <= max_fee_bps, "fee_bps must be <= max_fee_bps");
         assert!(min_amount > 0, "min_amount must be > 0");
         assert!(max_amount >= min_amount, "max_amount must be >= min_amount");
+        assert!(execution_delay > 0, "execution_delay must be > 0");
 
         Self::validate_admins(&env, &admins);
 
@@ -326,6 +353,10 @@ impl OnboardingBridge {
         );
         env.storage().instance().set(&DataKey::FundingCount, &0u32);
         env.storage().instance().set(&DataKey::NextArchiveId, &0u32);
+        env.storage().instance().set(&DataKey::NextArchiveRecordId, &1u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::ExecutionDelay, &execution_delay);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::ProposalNonce, &0u32);
         env.storage().instance().set(&DataKey::NextPruneId, &1u32);
@@ -580,19 +611,18 @@ impl OnboardingBridge {
                 .instance()
                 .set(&DataKey::AccumulatedFees, &(accumulated + fee));
 
-            if Self::is_fee_token_whitelisted(env.clone(), token_address.clone()) {
-                let token_fee_rate = Self::fee_token_rate(env.clone(), token_address.clone());
-                let token_fee = (fee * token_fee_rate as i128) / 10000;
-                let token_accumulated: i128 = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::AccumulatedFeesByToken(token_address.clone()))
-                    .unwrap_or(0);
-                env.storage().instance().set(
-                    &DataKey::AccumulatedFeesByToken(token_address.clone()),
-                    &(token_accumulated + token_fee),
-                );
-            }
+            // The contract holds the actual fee in `token_address`, regardless
+            // of whitelist status or the optional display/conversion rate.
+            // Keep the per-token ledger in the same units as the token balance.
+            let token_accumulated: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::AccumulatedFeesByToken(token_address.clone()))
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &DataKey::AccumulatedFeesByToken(token_address.clone()),
+                &(token_accumulated + fee),
+            );
         }
         tk.transfer(&env.current_contract_address(), target, &net_amount);
 
@@ -751,11 +781,19 @@ impl OnboardingBridge {
             .instance()
             .get(&DataKey::FundingCount)
             .unwrap_or(0);
-        let archive_count = if count > total { total } else { count };
+        let start: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextArchiveRecordId)
+            .unwrap_or(1);
+        assert!(start <= total, "{}", ERR_NO_ENTRIES_TO_ARCHIVE);
+        let available = total - start + 1;
+        let archive_count = if count > available { available } else { count };
         assert!(archive_count > 0, "{}", ERR_NO_ENTRIES_TO_ARCHIVE);
 
         let mut hash_bytes = Bytes::new(env);
-        for i in 1..=archive_count {
+        let end = start + archive_count - 1;
+        for i in start..=end {
             if let Some(mut record) = env
                 .storage()
                 .persistent()
@@ -795,6 +833,9 @@ impl OnboardingBridge {
         env.storage()
             .instance()
             .set(&DataKey::NextArchiveId, &(archive_id + 1));
+        env.storage()
+            .instance()
+            .set(&DataKey::NextArchiveRecordId, &(end + 1));
 
         env.events().publish(
             (Symbol::new(env, "archived"),),
@@ -955,19 +996,25 @@ impl OnboardingBridge {
             "insufficient approvals"
         );
 
-        // Enforce a minimum transparency window for sensitive actions.
-        // Prevents a single admin (threshold == 1) from proposing and
-        // immediately executing WithdrawFees, SetFee, or Pause in the same
-        // ledger with no observation window.
+        // Enforce a minimum transparency window for every action that can
+        // move funds, change fees, pause the bridge, or alter governance.
         let sensitive = matches!(
             proposal.action,
             ProposalAction::WithdrawFees(_, _, _)
                 | ProposalAction::SetFee(_)
                 | ProposalAction::Pause
+                | ProposalAction::Unpause
+                | ProposalAction::RotateAdmins(_)
+                | ProposalAction::SetThreshold(_)
         );
         if sensitive {
+            let execution_delay: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ExecutionDelay)
+                .unwrap_or(MIN_EXEC_DELAY);
             assert!(
-                env.ledger().sequence() >= proposal.proposed_at + MIN_EXEC_DELAY,
+                env.ledger().sequence() >= proposal.proposed_at + execution_delay,
                 "execution too soon: minimum delay not elapsed"
             );
         }
@@ -1023,20 +1070,33 @@ impl OnboardingBridge {
                 0i128
             }
             ProposalAction::WithdrawFees(to, token, amount) => {
+                let token_key = DataKey::AccumulatedFeesByToken(token.clone());
+                let token_accumulated: i128 = env
+                    .storage()
+                    .instance()
+                    .get(&token_key)
+                    .unwrap_or(0);
+                let withdraw_amount = if amount == 0 { token_accumulated } else { amount };
+                assert!(
+                    withdraw_amount <= token_accumulated,
+                    "insufficient accumulated fees"
+                );
+                let remaining = token_accumulated - withdraw_amount;
+                env.storage()
+                    .instance()
+                    .set(&token_key, &remaining);
                 let accumulated: i128 = env
                     .storage()
                     .instance()
                     .get(&DataKey::AccumulatedFees)
                     .unwrap_or(0);
-                let withdraw_amount = if amount == 0 { accumulated } else { amount };
                 assert!(
                     withdraw_amount <= accumulated,
                     "insufficient accumulated fees"
                 );
-                let remaining = accumulated - withdraw_amount;
                 env.storage()
                     .instance()
-                    .set(&DataKey::AccumulatedFees, &remaining);
+                    .set(&DataKey::AccumulatedFees, &(accumulated - withdraw_amount));
                 let tk = token::Client::new(&env, &token);
                 tk.transfer(&env.current_contract_address(), &to, &withdraw_amount);
                 env.events().publish(

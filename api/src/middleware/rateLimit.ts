@@ -149,7 +149,77 @@ export function trackRequestCost(apiKey: string, cost: number): boolean {
  * Abuse detection middleware — must run after express.json() so req.body is populated.
  */
 export function fundAbuseDetectionMiddleware(req: Request, res: Response, next: NextFunction) {
-  throw new Error('Not implemented: fundAbuseDetectionMiddleware');
+  const ip = req.ip ?? 'unknown';
+  const apiKeyId = req.apiKeyRecord?.id ?? (req.headers['x-api-key'] as string) ?? 'anonymous';
+  const key = `${ip}_${apiKeyId}`;
+
+  if (isIPBanned(ip)) {
+    res.status(403).json({ error: 'forbidden', message: 'IP temporarily banned due to suspicious activity' });
+    return;
+  }
+
+  const activity = abuseCache.get<SuspiciousActivity>(key) || {
+    count: 0,
+    firstSeen: Date.now(),
+    patterns: [],
+    addresses: [],
+  };
+
+  activity.count++;
+  let detectedPattern: string | null = null;
+  const body = req.body as Record<string, unknown> | undefined;
+
+  if (body?.amount && parseInt(String(body.amount), 10) > LARGE_AMOUNT_THRESHOLD) {
+    detectedPattern = 'large_amount';
+  }
+
+  const targetAddress = body?.targetAddress as string | undefined;
+  if (targetAddress) {
+    if (!activity.addresses.includes(targetAddress)) {
+      activity.addresses.push(targetAddress);
+    }
+    if (activity.addresses.length > 10) {
+      detectedPattern = 'multiple_addresses';
+    }
+  }
+
+  if (Date.now() - activity.firstSeen < 60_000 && activity.count > 20) {
+    detectedPattern = 'rapid_requests';
+  }
+
+  if (detectedPattern) {
+    activity.patterns.push(detectedPattern);
+
+    if (activity.patterns.filter((p) => p === detectedPattern).length >= SUSPICIOUS_PATTERN_THRESHOLD) {
+      const banCount = (ipBanCache.get<number>(`ban_count_${ip}`) || 0) + 1;
+      ipBanCache.set(`ban_count_${ip}`, banCount);
+
+      if (banCount >= BAN_THRESHOLD) {
+        banIP(ip, detectedPattern);
+        res.status(403).json({ error: 'forbidden', message: 'IP temporarily banned due to suspicious activity' });
+        return;
+      }
+
+      logger.warn({ ip, pattern: detectedPattern, count: activity.count }, 'Suspicious activity detected');
+      void sendAbuseAlert({
+        type: 'suspicious_activity',
+        ip,
+        apiKeyId,
+        pattern: detectedPattern,
+        details: { count: activity.count },
+      });
+    }
+  }
+  // NodeCache stores clones, so persist after all mutations above.
+  abuseCache.set(key, activity);
+
+  const rawKey = req.headers['x-api-key'] as string | undefined;
+  if (rawKey && !trackRequestCost(rawKey, 100)) {
+    res.status(429).json({ error: 'rate_limit', message: 'API key cost limit exceeded' });
+    return;
+  }
+
+  next();
 }
 
 /** @deprecated Use ipRateLimitMiddleware + fundEndpointRateLimit */

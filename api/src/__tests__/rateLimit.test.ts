@@ -226,13 +226,13 @@ describe('Rate Limit Abuse Detection', () => {
   });
 
   describe('Request Cost Tracking', () => {
-    it.skip('tracks request cost for API key', () => {
+    it('tracks request cost for API key', () => {
       const result = trackRequestCost('api-key-1', 100);
 
       expect(result).toBe(true);
     });
 
-    it.skip('accumulates costs across multiple requests', () => {
+    it('accumulates costs across multiple requests', () => {
       trackRequestCost('api-key-2', 100);
       trackRequestCost('api-key-2', 200);
       const result = trackRequestCost('api-key-2', 50);
@@ -240,7 +240,7 @@ describe('Rate Limit Abuse Detection', () => {
       expect(result).toBe(true);
     });
 
-    it.skip('rejects requests when cost limit exceeded', () => {
+    it('rejects requests when cost limit exceeded', () => {
       const apiKey = 'api-key-exceed';
       const maxCost = 1_000_000;
 
@@ -255,7 +255,7 @@ describe('Rate Limit Abuse Detection', () => {
       );
     });
 
-    it.skip('returns false when cost limit exceeded', () => {
+    it('returns false when cost limit exceeded', () => {
       const apiKey = 'api-key-limit';
       trackRequestCost(apiKey, 1_000_001);
 
@@ -264,14 +264,14 @@ describe('Rate Limit Abuse Detection', () => {
       expect(result).toBe(false);
     });
 
-    it.skip('tracks independent costs per API key', () => {
+    it('tracks independent costs per API key', () => {
       trackRequestCost('key-a', 100);
       trackRequestCost('key-b', 200);
 
       expect(mockSendAbuseAlert).not.toHaveBeenCalled();
     });
 
-    it.skip('resets cost tracking after TTL (3600s)', async () => {
+    it('resets cost tracking after TTL (3600s)', async () => {
       // Cost tracking should respect TTL, but for testing we verify tracking works
       const result = trackRequestCost('api-key-ttl', 500);
       expect(result).toBe(true);

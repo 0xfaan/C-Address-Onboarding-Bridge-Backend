@@ -124,7 +124,25 @@ export function applyRateLimitHeaders(_req: Request, res: Response, next: NextFu
 }
 
 export function trackRequestCost(apiKey: string, cost: number): boolean {
-  throw new Error('Not implemented: trackRequestCost');
+  const key = `cost_${apiKey}`;
+  const current = requestCostCache.get<RequestCost>(key) || { totalCost: 0, requestCount: 0 };
+
+  current.totalCost += cost;
+  current.requestCount++;
+  requestCostCache.set(key, current);
+
+  if (current.totalCost > MAX_REQUEST_COST_PER_KEY) {
+    // Never log the raw key; the alert channel receives it for correlation.
+    logger.warn({ apiKey: `***${apiKey.slice(-4)}`, totalCost: current.totalCost }, 'API key exceeded cost limit');
+    void sendAbuseAlert({
+      type: 'cost_limit_exceeded',
+      ip: 'unknown',
+      apiKeyId: apiKey,
+      details: { totalCost: current.totalCost },
+    });
+    return false;
+  }
+  return true;
 }
 
 /**

@@ -205,51 +205,62 @@ const SUSPICIOUS_WINDOW_MS = 60_000;
 const SUSPICIOUS_THRESHOLD = 10;
 
 export function suspiciousRateLimiting(req: Request, res: Response, next: NextFunction): void {
-  const ip = req.ip ?? '0.0.0.0';
-  if (flagSuspiciousRequest(ip)) {
-    res.status(429).json({ error: 'rate_limited', message: 'Too many suspicious requests' });
+  const ip = req.ip?.trim() || '0.0.0.0';
+  const isRateLimited = flagSuspiciousRequest(ip);
+
+  if (!isRateLimited) {
+    next();
     return;
   }
-  next();
+
+  if (res.headersSent) {
+    next();
+    return;
+  }
+
+  res.status(429).json({ error: 'rate_limited', message: 'Too many suspicious requests' });
 }
 
 export function flagSuspiciousRequest(ip: string): boolean {
   const now = Date.now();
   const record = suspiciousIpCounts.get(ip);
 
-  if (!record || now - record.windowStart > SUSPICIOUS_WINDOW_MS) {
-    suspiciousIpCounts.set(ip, { count: 1, windowStart: now });
-    return false;
+  if (record && now - record.windowStart <= SUSPICIOUS_WINDOW_MS) {
+    record.count += 1;
+    return record.count >= SUSPICIOUS_THRESHOLD;
   }
 
-  record.count++;
-  if (record.count >= SUSPICIOUS_THRESHOLD) {
-    return true;
+  if (!record || now - record.windowStart > SUSPICIOUS_WINDOW_MS) {
+    suspiciousIpCounts.set(ip, { count: 1, windowStart: now });
   }
 
   return false;
 }
 
 export function xssErrorSanitizer(err: Error, _req: Request, res: Response, next: NextFunction): void {
-  if (!res.headersSent) {
-    const sanitized = sanitizeErrorMessage(err.message);
-    res.status(500).json({ error: 'internal_server_error', message: sanitized });
-  } else {
+  if (res.headersSent) {
     next(err);
+    return;
   }
+
+  const sanitizedMessage = sanitizeErrorMessage(err.message);
+  res.status(500).json({ error: 'internal_server_error', message: sanitizedMessage });
 }
 
 export { sanitizeErrorMessage };
 
 export function securityMiddleware(req: Request, res: Response, next: NextFunction): void {
-  // Chain security middleware checks in order of importance
-  contentTypeEnforcement(req, res, () => {
-    requestSizeLimiting(req, res, () => {
-      injectionProtection(req, res, () => {
-        parameterPollutionProtection(req, res, () => {
-          suspiciousRateLimiting(req, res, next);
-        });
-      });
-    });
-  });
+  const runParameterChecks = (): void => {
+    parameterPollutionProtection(req, res, () => suspiciousRateLimiting(req, res, next));
+  };
+
+  const runInjectionChecks = (): void => {
+    injectionProtection(req, res, runParameterChecks);
+  };
+
+  const runSizeChecks = (): void => {
+    requestSizeLimiting(req, res, runInjectionChecks);
+  };
+
+  contentTypeEnforcement(req, res, runSizeChecks);
 }

@@ -208,7 +208,9 @@ export function rbacAuth(req: Request, res: Response, next: NextFunction): void 
 }
 
 export function getAuditLog(): typeof auditLog {
-  return [...auditLog];
+  // Copy each entry too: returning the stored objects would let callers
+  // rewrite recorded audit history.
+  return auditLog.map((entry) => ({ ...entry }));
 }
 
 export function seedLegacyKeys(rawKeys: string[]): void {

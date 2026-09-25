@@ -58,8 +58,18 @@ function flattenValue(v: unknown): string[] {
   return [];
 }
 
+/**
+ * RegExp.test is stateful for /g patterns (it advances lastIndex), so the
+ * same payload could alternately match and not match across requests.
+ * Reset lastIndex before every test.
+ */
+function testPattern(pattern: RegExp, value: string): boolean {
+  pattern.lastIndex = 0;
+  return pattern.test(value);
+}
+
 function detectPatterns(values: string[], patterns: RegExp[]): boolean {
-  return values.some((v) => patterns.some((p) => p.test(v)));
+  return values.some((v) => patterns.some((p) => testPattern(p, v)));
 }
 
 const MULTI_VALUED_QUERY_PARAMS = new Set([
@@ -140,13 +150,13 @@ export function injectionProtection(req: Request, res: Response, next: NextFunct
     if (typeof obj === 'string') {
       // Skip SQL patterns for freetext fields; always check NoSQL and XSS
       if (!isInFreetextField && detectPatterns([obj], SQL_PATTERNS)) {
-        return { match: SQL_PATTERNS.find((p) => p.test(obj)) as RegExp, field: path || 'unknown' };
+        return { match: SQL_PATTERNS.find((p) => testPattern(p, obj)) as RegExp, field: path || 'unknown' };
       }
       if (detectPatterns([obj], NOSQL_PATTERNS)) {
-        return { match: NOSQL_PATTERNS.find((p) => p.test(obj)) as RegExp, field: path || 'unknown' };
+        return { match: NOSQL_PATTERNS.find((p) => testPattern(p, obj)) as RegExp, field: path || 'unknown' };
       }
       if (detectPatterns([obj], XSS_PATTERNS)) {
-        return { match: XSS_PATTERNS.find((p) => p.test(obj)) as RegExp, field: path || 'unknown' };
+        return { match: XSS_PATTERNS.find((p) => testPattern(p, obj)) as RegExp, field: path || 'unknown' };
       }
       return null;
     }
@@ -163,8 +173,8 @@ export function injectionProtection(req: Request, res: Response, next: NextFunct
       const objMap = obj as Record<string, unknown>;
       // Check keys for NoSQL operators like $where, $ne
       if (detectPatterns(Object.keys(objMap), NOSQL_PATTERNS)) {
-        const badKey = Object.keys(objMap).find((k) => NOSQL_PATTERNS.some((p) => p.test(k)));
-        return { match: NOSQL_PATTERNS.find((p) => p.test(badKey ?? '')) as RegExp, field: path ? `${path}.${badKey}` : badKey ?? 'unknown' };
+        const badKey = Object.keys(objMap).find((k) => NOSQL_PATTERNS.some((p) => testPattern(p, k)));
+        return { match: NOSQL_PATTERNS.find((p) => testPattern(p, badKey ?? '')) as RegExp, field: path ? `${path}.${badKey}` : badKey ?? 'unknown' };
       }
 
       for (const [key, value] of Object.entries(objMap)) {

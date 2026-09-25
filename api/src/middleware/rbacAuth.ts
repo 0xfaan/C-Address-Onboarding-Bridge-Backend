@@ -149,6 +149,9 @@ export function updateApiKey(
 }
 
 export function resolveRecord(rawKey: string): ApiKeyRecord | undefined {
+  // Header values can arrive as arrays or be empty; hashing a non-string
+  // throws, so treat anything but a non-empty string as an unknown key.
+  if (typeof rawKey !== 'string' || rawKey.length === 0) return undefined;
   const hash = hashKey(rawKey);
   return keyHashIndex.get(hash);
 }

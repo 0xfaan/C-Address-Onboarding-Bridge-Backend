@@ -77,10 +77,16 @@ const MULTI_VALUED_QUERY_PARAMS = new Set([
   'type',
 ]);
 
+/** Upper bound on values for params that may legitimately repeat. */
+const MAX_MULTI_VALUES = 20;
+
 function hasParameterPollution(query: Record<string, unknown>): boolean {
   return Object.entries(query).some(([key, v]) => {
+    // qs turns `a[b]=1` into an object: never a valid single value here.
+    if (v !== null && typeof v === 'object' && !Array.isArray(v)) return true;
     if (!Array.isArray(v)) return false;
-    return !MULTI_VALUED_QUERY_PARAMS.has(key);
+    if (!MULTI_VALUED_QUERY_PARAMS.has(key)) return true;
+    return v.length > MAX_MULTI_VALUES || v.some((item) => typeof item !== 'string');
   });
 }
 
@@ -203,8 +209,8 @@ export function injectionProtection(req: Request, res: Response, next: NextFunct
 }
 
 export function parameterPollutionProtection(req: Request, res: Response, next: NextFunction): void {
-  if (hasParameterPollution(req.query)) {
-    res.status(400).json({ error: 'invalid_input', message: 'duplicate query parameters detected' });
+  if (hasParameterPollution(req.query as Record<string, unknown>)) {
+    res.status(400).json({ error: 'invalid_input', message: 'duplicate or nested query parameters detected' });
     return;
   }
   next();

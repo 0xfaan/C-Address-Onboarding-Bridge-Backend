@@ -74,6 +74,8 @@ const MAX_SAFE_AMOUNT: i128 = i128::MAX / 10_000;
 /// every tier on each funding call, so this bounds that cost regardless of
 /// how many `set_rebate_tier` calls have ever been made.
 const MAX_TIERS: u32 = 50;
+/// Maximum memo size stored in each funding record, in bytes.
+const MAX_MEMO_BYTES: u32 = 64;
 
 const ERR_INVALID_C_ADDRESS: &str = "invalid c-address: not a contract address";
 const ERR_REENTRANT_CALL: &str = "reentrant call detected";
@@ -557,6 +559,7 @@ impl OnboardingBridge {
             amount <= MAX_SAFE_AMOUNT,
             "amount too large: would overflow fee calculation"
         );
+        assert!(memo.len() <= MAX_MEMO_BYTES, "memo exceeds maximum length");
 
         let fee_bps: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
         let discount = rebate_bps(env, source);

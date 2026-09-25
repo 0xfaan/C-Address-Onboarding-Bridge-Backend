@@ -120,7 +120,12 @@ export function revokeApiKey(id: string): boolean {
 }
 
 export function listApiKeys(): Omit<ApiKeyRecord, 'keyHash'>[] {
-  return Array.from(keyStore.values()).map(({ keyHash, ...rest }) => rest);
+  // Copy the arrays so callers cannot change a stored key's scopes or IP whitelist.
+  return Array.from(keyStore.values()).map(({ keyHash, ...rest }) => ({
+    ...rest,
+    scopes: [...rest.scopes],
+    ipWhitelist: [...rest.ipWhitelist],
+  }));
 }
 
 export function getApiKey(id: string): Omit<ApiKeyRecord, 'keyHash'> | undefined {

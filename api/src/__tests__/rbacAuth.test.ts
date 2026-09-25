@@ -253,3 +253,20 @@ describe('resolveRecord performance', () => {
     expect(duration).toBeLessThan(5);
   });
 });
+
+describe('listApiKeys', () => {
+  it('omits keyHash and returns copies that cannot mutate stored keys', () => {
+    seedLegacyKeys(['list-copy-key-0001']);
+    const record = listApiKeys().find((k) => k.name === 'Legacy key');
+    expect(record).toBeDefined();
+    expect(record).not.toHaveProperty('keyHash');
+
+    const originalScopes = [...record!.scopes];
+    record!.scopes.push('admin:keys');
+    record!.ipWhitelist.push('0.0.0.0/0');
+
+    const fresh = listApiKeys().find((k) => k.id === record!.id)!;
+    expect(fresh.scopes).toEqual(originalScopes);
+    expect(fresh.ipWhitelist).toEqual([]);
+  });
+});

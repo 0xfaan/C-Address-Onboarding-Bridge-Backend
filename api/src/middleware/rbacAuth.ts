@@ -38,6 +38,8 @@ export interface CreateKeyInput {
 const keyStore = new Map<string, ApiKeyRecord>();
 const keyHashIndex = new Map<string, ApiKeyRecord>();
 const auditLog: Array<{ ts: number; keyId: string; ip: string; path: string; method: string }> = [];
+/** Keep the in-memory audit log bounded; oldest entries are dropped first. */
+const MAX_AUDIT_LOG_ENTRIES = 10_000;
 
 function hashKey(rawKey: string): string {
   return crypto.createHash('sha256').update(rawKey).digest('hex');
@@ -177,7 +179,8 @@ export function requireScopes(...required: PermissionScope[]) {
 }
 
 export function rbacAuth(req: Request, res: Response, next: NextFunction): void {
-  const apiKey = req.headers['x-api-key'] as string | undefined;
+  const header = req.headers['x-api-key'];
+  const apiKey = Array.isArray(header) ? header[0] : header;
   if (!apiKey) {
     res.status(401).json({ error: 'missing_api_key' });
     return;
@@ -208,7 +211,8 @@ export function rbacAuth(req: Request, res: Response, next: NextFunction): void 
   record.lastUsedAt = Date.now();
   const { keyHash, ...publicRecord } = record;
   req.apiKeyRecord = publicRecord;
-  req.resolvedScopes = record.scopes;
+  // Copy so downstream middleware cannot alter the stored key's scopes.
+  req.resolvedScopes = [...record.scopes];
 
   auditLog.push({
     ts: Date.now(),
@@ -217,6 +221,9 @@ export function rbacAuth(req: Request, res: Response, next: NextFunction): void 
     path: req.path,
     method: req.method,
   });
+  if (auditLog.length > MAX_AUDIT_LOG_ENTRIES) {
+    auditLog.splice(0, auditLog.length - MAX_AUDIT_LOG_ENTRIES);
+  }
 
   next();
 }

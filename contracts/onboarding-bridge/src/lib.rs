@@ -243,6 +243,17 @@ impl OnboardingBridge {
         }
     }
 
+    fn assert_not_paused(env: &Env) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            panic!("contract is paused");
+        }
+    }
+
     fn validate_admins(env: &Env, admins: &Vec<Address>) {
         let contract_address = env.current_contract_address();
         for i in 0..admins.len() {
@@ -290,9 +301,10 @@ impl OnboardingBridge {
         min_amount: i128,
         max_amount: i128,
     ) {
-        if env.storage().instance().has(&DataKey::Version) {
-            return;
-        }
+        assert!(
+            !env.storage().instance().has(&DataKey::Version),
+            "contract already initialized"
+        );
         assert!(!admins.is_empty(), "admins must not be empty");
         assert!(threshold > 0, "threshold must be > 0");
         assert!(threshold <= admins.len(), "threshold exceeds admin count");
@@ -302,6 +314,9 @@ impl OnboardingBridge {
         assert!(max_amount >= min_amount, "max_amount must be >= min_amount");
 
         Self::validate_admins(&env, &admins);
+        for i in 0..admins.len() {
+            admins.get_unchecked(i).require_auth();
+        }
 
         env.storage().instance().set(&DataKey::Admins, &admins);
         env.storage()
@@ -513,18 +528,12 @@ impl OnboardingBridge {
         amount: i128,
         memo: String,
     ) -> i128 {
+        source.require_auth();
+        Self::assert_not_paused(&env);
         Self::extend_ttl(&env);
         Self::pre_reentrancy_check(&env);
         Self::validate_c_address(&target);
         assert!(amount > 0, "amount must be positive");
-        if env
-            .storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false)
-        {
-            panic!("contract is paused");
-        }
         Self::set_reentrancy_guard(&env);
         let result =
             Self::fund_c_address_internal(&env, &source, &target, &token_address, amount, &memo);
@@ -670,9 +679,10 @@ impl OnboardingBridge {
         amounts: Vec<i128>,
         memos: Vec<String>,
     ) -> (i128, u32) {
+        source.require_auth();
+        Self::assert_not_paused(&env);
         Self::extend_ttl(&env);
         Self::pre_reentrancy_check(&env);
-        source.require_auth();
 
         let count = targets.len();
         assert!(count > 0, "{}", ERR_EMPTY_BATCH);
@@ -716,19 +726,12 @@ impl OnboardingBridge {
         amount: i128,
         memo: String,
     ) -> i128 {
+        exchange.require_auth();
+        Self::assert_not_paused(&env);
         Self::extend_ttl(&env);
         Self::pre_reentrancy_check(&env);
         Self::validate_c_address(&target);
         assert!(amount > 0, "amount must be positive");
-        if env
-            .storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false)
-        {
-            panic!("contract is paused");
-        }
-        exchange.require_auth();
         Self::fund_c_address_internal(&env, &exchange, &target, &token_address, amount, &memo)
     }
 
@@ -950,8 +953,20 @@ impl OnboardingBridge {
             "proposal expired"
         );
         assert!(!proposal.executed, "proposal already executed");
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admins)
+            .expect("not initialized");
+        let mut current_admin_approvals = 0u32;
+        for i in 0..admins.len() {
+            let approval_key = DataKey::ProposalApproval(proposal_id, admins.get_unchecked(i));
+            if env.storage().instance().has(&approval_key) {
+                current_admin_approvals += 1;
+            }
+        }
         assert!(
-            proposal.approval_count >= threshold,
+            current_admin_approvals >= threshold,
             "insufficient approvals"
         );
 

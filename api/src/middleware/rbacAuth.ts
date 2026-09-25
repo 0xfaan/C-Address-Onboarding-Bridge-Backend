@@ -165,8 +165,11 @@ declare module 'express-serve-static-core' {
 
 export function requireScopes(...required: PermissionScope[]) {
   return (req: Request, res: Response, next: NextFunction): void => {
-    if (!req.resolvedScopes || !required.every((scope) => req.resolvedScopes!.includes(scope))) {
-      res.status(403).json({ error: 'insufficient_scope' });
+    const granted = req.resolvedScopes ?? [];
+    const missing = required.filter((scope) => !granted.includes(scope));
+    if (!req.resolvedScopes || missing.length > 0) {
+      // Name the missing scopes so clients can tell which permission to request.
+      res.status(403).json({ error: 'insufficient_scope', required, missing });
       return;
     }
     next();

@@ -576,9 +576,12 @@ impl OnboardingBridge {
                 .instance()
                 .get(&DataKey::AccumulatedFees)
                 .unwrap_or(0);
+            let new_accumulated = accumulated
+                .checked_add(fee)
+                .expect("accumulated fee overflow");
             env.storage()
                 .instance()
-                .set(&DataKey::AccumulatedFees, &(accumulated + fee));
+                .set(&DataKey::AccumulatedFees, &new_accumulated);
 
             if Self::is_fee_token_whitelisted(env.clone(), token_address.clone()) {
                 let token_fee_rate = Self::fee_token_rate(env.clone(), token_address.clone());
@@ -588,9 +591,12 @@ impl OnboardingBridge {
                     .instance()
                     .get(&DataKey::AccumulatedFeesByToken(token_address.clone()))
                     .unwrap_or(0);
+                let new_token_accumulated = token_accumulated
+                    .checked_add(token_fee)
+                    .expect("token fee accumulator overflow");
                 env.storage().instance().set(
                     &DataKey::AccumulatedFeesByToken(token_address.clone()),
-                    &(token_accumulated + token_fee),
+                    &new_token_accumulated,
                 );
             }
         }
@@ -598,14 +604,15 @@ impl OnboardingBridge {
 
         let vol_key = DataKey::UserVolume(source.clone());
         let vol: i128 = env.storage().instance().get(&vol_key).unwrap_or(0);
-        env.storage().instance().set(&vol_key, &(vol + amount));
+        let new_vol = vol.checked_add(amount).expect("user volume overflow");
+        env.storage().instance().set(&vol_key, &new_vol);
 
         let count: u32 = env
             .storage()
             .instance()
             .get(&DataKey::FundingCount)
             .unwrap_or(0);
-        let id = count + 1;
+        let id = count.checked_add(1).expect("funding count overflow");
         let record = FundingRecord {
             source: source.clone(),
             target: target.clone(),
@@ -630,16 +637,22 @@ impl OnboardingBridge {
             .instance()
             .get(&DataKey::TotalVolume)
             .unwrap_or(0);
+        let new_total_vol = total_vol
+            .checked_add(amount)
+            .expect("total volume overflow");
         env.storage()
             .instance()
-            .set(&DataKey::TotalVolume, &(total_vol + amount));
+            .set(&DataKey::TotalVolume, &new_total_vol);
 
         // Track per-token volume separately for meaningful multi-token analytics
         let token_vol_key = DataKey::TotalVolumeByToken(token_address.clone());
         let token_vol: i128 = env.storage().instance().get(&token_vol_key).unwrap_or(0);
+        let new_token_vol = token_vol
+            .checked_add(amount)
+            .expect("token volume overflow");
         env.storage()
             .instance()
-            .set(&token_vol_key, &(token_vol + amount));
+            .set(&token_vol_key, &new_token_vol);
 
         let unique_key = DataKey::UniqueFunder(source.clone());
         if !env.storage().persistent().has(&unique_key) {
@@ -649,9 +662,10 @@ impl OnboardingBridge {
                 .instance()
                 .get(&DataKey::UniqueFunderCount)
                 .unwrap_or(0);
+            let new_uc = uc.checked_add(1).expect("unique funder count overflow");
             env.storage()
                 .instance()
-                .set(&DataKey::UniqueFunderCount, &(uc + 1));
+                .set(&DataKey::UniqueFunderCount, &new_uc);
         }
 
         env.events().publish(
@@ -694,8 +708,17 @@ impl OnboardingBridge {
             let token_addr = token_addresses.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
             let memo = memos.get(i).unwrap();
-            total_fees +=
-                Self::fund_c_address_internal(&env, &source, &target, &token_addr, amount, &memo);
+            let fee = Self::fund_c_address_internal(
+                &env,
+                &source,
+                &target,
+                &token_addr,
+                amount,
+                &memo,
+            );
+            total_fees = total_fees
+                .checked_add(fee)
+                .expect("batch fee total overflow");
         }
 
         env.events().publish(

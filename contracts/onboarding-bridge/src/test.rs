@@ -1565,6 +1565,27 @@ fn test_fund_c_address_tracks_fees() {
 }
 
 #[test]
+#[should_panic(expected = "accumulated fee overflow")]
+fn test_fund_c_address_rejects_fee_accumulator_overflow() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 10000, 10000);
+    let source = Address::generate(&env);
+    let target = Address::generate(&env);
+    let token_addr = register_test_token(&env);
+    TestTokenClient::new(&env, &token_addr).mint(&source, &1);
+    env.storage()
+        .instance()
+        .set(&DataKey::AccumulatedFees, &i128::MAX);
+
+    bridge.fund_c_address(
+        &source,
+        &target,
+        &token_addr,
+        &1,
+        &String::from_str(&env, "overflow"),
+    );
+}
+
+#[test]
 fn test_fund_with_zero_fee() {
     let (env, bridge, _admins) = setup_env_with_admins(2, 2, 0, 1000);
     let source = Address::generate(&env);

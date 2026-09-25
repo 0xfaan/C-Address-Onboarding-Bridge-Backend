@@ -11,6 +11,7 @@ import {
   createApiKey,
   revokeApiKey,
   listApiKeys,
+  getApiKey,
   updateApiKey,
   rbacAuth,
   requireScopes,
@@ -268,5 +269,25 @@ describe('listApiKeys', () => {
     const fresh = listApiKeys().find((k) => k.id === record!.id)!;
     expect(fresh.scopes).toEqual(originalScopes);
     expect(fresh.ipWhitelist).toEqual([]);
+  });
+});
+
+describe('getApiKey', () => {
+  it('returns undefined for an unknown id', () => {
+    expect(getApiKey('does-not-exist')).toBeUndefined();
+  });
+
+  it('omits keyHash and returns a copy that cannot mutate the stored key', () => {
+    seedLegacyKeys(['get-copy-key-0001']);
+    const { id } = listApiKeys().find((k) => k.name === 'Legacy key')!;
+    const record = getApiKey(id)!;
+    expect(record).not.toHaveProperty('keyHash');
+
+    const originalScopes = [...record.scopes];
+    record.scopes.push('admin:keys');
+    record.ipWhitelist.push('0.0.0.0/0');
+
+    expect(getApiKey(id)!.scopes).toEqual(originalScopes);
+    expect(getApiKey(id)!.ipWhitelist).toEqual([]);
   });
 });

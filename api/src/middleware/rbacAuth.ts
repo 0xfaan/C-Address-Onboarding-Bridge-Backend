@@ -132,7 +132,8 @@ export function getApiKey(id: string): Omit<ApiKeyRecord, 'keyHash'> | undefined
   const record = keyStore.get(id);
   if (!record) return undefined;
   const { keyHash, ...rest } = record;
-  return rest;
+  // Copy the arrays so callers cannot change the stored key's scopes or IP whitelist.
+  return { ...rest, scopes: [...rest.scopes], ipWhitelist: [...rest.ipWhitelist] };
 }
 
 export function updateApiKey(

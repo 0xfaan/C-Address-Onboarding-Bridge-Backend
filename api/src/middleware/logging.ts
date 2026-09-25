@@ -37,7 +37,20 @@ export function maskHeaders(
 }
 
 export function maskBody(body: unknown, depth = 0): unknown {
-  throw new Error('Not implemented: maskBody');
+  if (depth > 5 || body === null || body === undefined) return body;
+  if (typeof body !== 'object') return body;
+  if (Array.isArray(body)) return body.map((item) => maskBody(item, depth + 1));
+
+  const result: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(body as Record<string, unknown>)) {
+    if (sensitiveBodyFields.has(key)) {
+      const str = typeof val === 'string' ? val : JSON.stringify(val) ?? '';
+      result[key] = maskValue(str);
+    } else {
+      result[key] = maskBody(val, depth + 1);
+    }
+  }
+  return result;
 }
 
 function truncate(body: unknown): string {

@@ -60,5 +60,38 @@ function truncate(body: unknown): string {
 }
 
 export function loggingMiddleware(req: Request, res: Response, next: NextFunction): void {
-  throw new Error('Not implemented: loggingMiddleware');
+  const start = Date.now();
+  const reqId = Math.random().toString(36).slice(2, 10);
+
+  res.on('finish', () => {
+    const logger = req.app.get('logger');
+    if (!logger) return;
+    const durationMs = Date.now() - start;
+
+    if (logger.level === 'debug') {
+      logger.debug({
+        reqId,
+        method: req.method,
+        path: req.path,
+        query: req.query,
+        headers: maskHeaders(req.headers as Record<string, string | string[] | undefined>),
+        body: maskBody(req.body),
+        status: res.statusCode,
+        durationMs,
+        ip: req.ip,
+      }, 'request completed');
+    } else {
+      logger.info({
+        reqId,
+        method: req.method,
+        path: req.path,
+        status: res.statusCode,
+        durationMs,
+        ip: req.ip,
+        body: req.body !== undefined ? truncate(maskBody(req.body)) : undefined,
+      }, 'request completed');
+    }
+  });
+
+  next();
 }

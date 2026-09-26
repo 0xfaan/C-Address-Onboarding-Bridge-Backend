@@ -773,6 +773,20 @@ fn test_fund_c_address_negative_amount() {
 }
 
 #[test]
+#[should_panic(expected = "memo exceeds maximum length")]
+fn test_fund_c_address_rejects_oversized_memo() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    let source = Address::generate(&env);
+    let target = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+    let memo = String::from_str(
+        &env,
+        "12345678901234567890123456789012345678901234567890123456789012345",
+    );
+    bridge.fund_c_address(&source, &target, &token_addr, &1, &memo);
+}
+
+#[test]
 #[should_panic(expected = "amount must be positive")]
 fn test_route_from_exchange_zero_amount() {
     let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);

@@ -795,9 +795,12 @@ impl OnboardingBridge {
                 .instance()
                 .get(&DataKey::AccumulatedFees)
                 .unwrap_or(0);
+            let new_accumulated = accumulated
+                .checked_add(fee)
+                .expect("accumulated fee overflow");
             env.storage()
                 .instance()
-                .set(&DataKey::AccumulatedFees, &(accumulated + fee));
+                .set(&DataKey::AccumulatedFees, &new_accumulated);
 
             if Self::is_fee_token_whitelisted(env.clone(), token_address.clone()) {
                 let token_fee_rate = Self::fee_token_rate(env.clone(), token_address.clone());
@@ -807,9 +810,12 @@ impl OnboardingBridge {
                     .instance()
                     .get(&DataKey::AccumulatedFeesByToken(token_address.clone()))
                     .unwrap_or(0);
+                let new_token_accumulated = token_accumulated
+                    .checked_add(token_fee)
+                    .expect("token fee accumulator overflow");
                 env.storage().instance().set(
                     &DataKey::AccumulatedFeesByToken(token_address.clone()),
-                    &(token_accumulated + token_fee),
+                    &new_token_accumulated,
                 );
             }
         }
@@ -825,7 +831,7 @@ impl OnboardingBridge {
             .instance()
             .get(&DataKey::FundingCount)
             .unwrap_or(0);
-        let id = count + 1;
+        let id = count.checked_add(1).expect("funding count overflow");
         let record = FundingRecord {
             source: source.clone(),
             target: target.clone(),
@@ -858,9 +864,12 @@ impl OnboardingBridge {
             .instance()
             .get(&DataKey::TotalVolume)
             .unwrap_or(0);
+        let new_total_vol = total_vol
+            .checked_add(amount)
+            .expect("total volume overflow");
         env.storage()
             .instance()
-            .set(&DataKey::TotalVolume, &(total_vol + amount));
+            .set(&DataKey::TotalVolume, &new_total_vol);
 
         // Track per-token volume separately for meaningful multi-token analytics
         let token_vol_key = DataKey::TotalVolumeByToken(token_address.clone());
@@ -882,9 +891,10 @@ impl OnboardingBridge {
                 .instance()
                 .get(&DataKey::UniqueFunderCount)
                 .unwrap_or(0);
+            let new_uc = uc.checked_add(1).expect("unique funder count overflow");
             env.storage()
                 .instance()
-                .set(&DataKey::UniqueFunderCount, &(uc + 1));
+                .set(&DataKey::UniqueFunderCount, &new_uc);
         }
 
         Funded {

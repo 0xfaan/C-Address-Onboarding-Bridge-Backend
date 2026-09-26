@@ -51,16 +51,21 @@
 //! | `AutoWithdrawThreshold`| `i128`          | Auto-withdraw trigger level; 0 = off|
 
 #![no_std]
-#![allow(deprecated)]
 #![allow(clippy::needless_borrows_for_generic_args)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, crypto::Hash, token, Address, Bytes,
-    BytesN, Env, String, Symbol, Vec,
+    contract, contractevent, contractimpl, contracttype, crypto::Hash, token, Address, Bytes,
+    BytesN, Env, String, Vec,
 };
 
-const TTL_THRESHOLD: u32 = 5000;
-const TTL_EXTEND: u32 = 50000;
+// At five seconds per ledger, retain contract configuration and records for
+// roughly 30 days before renewal, and renew them for roughly 90 days.
+const INSTANCE_TTL_THRESHOLD: u32 = 518_400;
+const INSTANCE_TTL_EXTEND: u32 = 1_555_200;
+const PERSISTENT_TTL_THRESHOLD: u32 = 518_400;
+const PERSISTENT_TTL_EXTEND: u32 = 1_555_200;
+const TTL_THRESHOLD: u32 = PERSISTENT_TTL_THRESHOLD;
+const TTL_EXTEND: u32 = PERSISTENT_TTL_EXTEND;
 /// Minimum ledgers that must elapse between `propose` and `execute` for
 /// sensitive actions (WithdrawFees, SetFee, Pause). Prevents a single admin
 /// with threshold == 1 from proposing and immediately executing with no
@@ -74,6 +79,8 @@ const MAX_SAFE_AMOUNT: i128 = i128::MAX / 10_000;
 /// every tier on each funding call, so this bounds that cost regardless of
 /// how many `set_rebate_tier` calls have ever been made.
 const MAX_TIERS: u32 = 50;
+/// Maximum memo size stored in each funding record, in bytes.
+const MAX_MEMO_BYTES: u32 = 64;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -115,9 +122,138 @@ pub enum BridgeError {
     TierCapExceeded = 34,
 }
 
+#[contractevent(topics = ["initialize"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Initialized {
+    pub admins: Vec<Address>,
+    pub threshold: u32,
+    pub fee_bps: u32,
+    pub max_fee_bps: u32,
+    pub min_amount: i128,
+    pub max_amount: i128,
+}
+
+#[contractevent(topics = ["funded"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Funded {
+    #[topic]
+    pub source: Address,
+    #[topic]
+    pub target: Address,
+    #[topic]
+    pub token: Address,
+    pub amount: i128,
+    pub fee: i128,
+    pub discount: u32,
+}
+
+#[contractevent(topics = ["batch_funded"], data_format = "vec")]
+#[derive(Clone)]
+pub struct BatchFunded {
+    #[topic]
+    pub source: Address,
+    pub count: u32,
+    pub total_fees: i128,
+}
+
+#[contractevent(topics = ["archived"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Archived {
+    pub archive_count: u32,
+    pub hash: BytesN<32>,
+}
+
+#[contractevent(topics = ["proposed"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Proposed {
+    pub proposal_id: u32,
+    pub proposer: Address,
+    pub expiry: u32,
+}
+
+#[contractevent(topics = ["approved"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Approved {
+    pub proposal_id: u32,
+    pub admin: Address,
+    pub approval_count: u32,
+}
+
+#[contractevent(topics = ["set_fee"], data_format = "vec")]
+#[derive(Clone)]
+pub struct SetFee {
+    pub fee_bps: u32,
+}
+
+#[contractevent(topics = ["set_fee_token_whitelist"], data_format = "vec")]
+#[derive(Clone)]
+pub struct SetFeeTokenWhitelist {
+    #[topic]
+    pub token: Address,
+    pub enabled: bool,
+}
+
+#[contractevent(topics = ["set_fee_token_rate"], data_format = "vec")]
+#[derive(Clone)]
+pub struct SetFeeTokenRate {
+    #[topic]
+    pub token: Address,
+    pub rate: u32,
+}
+
+#[contractevent(topics = ["withdrawn"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Withdrawn {
+    pub to: Address,
+    #[topic]
+    pub token: Address,
+    pub amount: i128,
+}
+
+#[contractevent(topics = ["paused"])]
+#[derive(Clone)]
+pub struct Paused;
+
+#[contractevent(topics = ["unpaused"])]
+#[derive(Clone)]
+pub struct Unpaused;
+
+#[contractevent(topics = ["admins_rotated"], data_format = "vec")]
+#[derive(Clone)]
+pub struct AdminsRotated {
+    pub admins: Vec<Address>,
+}
+
+#[contractevent(topics = ["threshold_set"], data_format = "vec")]
+#[derive(Clone)]
+pub struct ThresholdSet {
+    pub threshold: u32,
+}
+
+#[contractevent(topics = ["tier_set"], data_format = "vec")]
+#[derive(Clone)]
+pub struct TierSet {
+    pub tier_index: u32,
+    pub threshold: i128,
+    pub discount_bps: u32,
+}
+
+#[contractevent(topics = ["executed"], data_format = "vec")]
+#[derive(Clone)]
+pub struct Executed {
+    pub proposal_id: u32,
+}
+
+#[contractevent(topics = ["proposals_pruned"], data_format = "vec")]
+#[derive(Clone)]
+pub struct ProposalsPruned {
+    pub pruned: u32,
+    pub cursor: u32,
+}
+
 /// Storage keys used throughout the contract.
 ///
-/// Every variant maps to a distinct slot in instance storage.
+/// Every variant maps to a distinct storage slot.
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -136,15 +272,17 @@ pub enum DataKey {
     ProposalNonce,
     Proposal(u32),
     ProposalApproval(u32, Address),
+    ActiveProposalIds,
     NextPruneId,
     ReentrancyGuard,
     Funding(u32),
     FundingCount,
+    HotCount,
     ArchivedHash(u32),
     NextArchiveId,
     MinAmount,
     MaxAmount,
-    UserVolume(Address),
+    UserVolume(Address, Address),
     TierThreshold(u32),
     TierDiscount(u32),
     TierCount,
@@ -231,11 +369,11 @@ pub struct Stats {
 #[contract]
 pub struct OnboardingBridge;
 
-fn rebate_bps(env: &Env, user: &Address) -> u32 {
+fn rebate_bps(env: &Env, user: &Address, token: &Address) -> u32 {
     let volume: i128 = env
         .storage()
-        .instance()
-        .get(&DataKey::UserVolume(user.clone()))
+        .persistent()
+        .get(&DataKey::UserVolume(user.clone(), token.clone()))
         .unwrap_or(0);
     let tier_count: u32 = env
         .storage()
@@ -246,12 +384,12 @@ fn rebate_bps(env: &Env, user: &Address) -> u32 {
     for i in 0..tier_count {
         let threshold: i128 = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::TierThreshold(i))
             .unwrap_or(0);
         let discount: u32 = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::TierDiscount(i))
             .unwrap_or(0);
         if volume >= threshold && discount > best {
@@ -311,7 +449,16 @@ impl OnboardingBridge {
     fn extend_ttl(env: &Env) {
         env.storage()
             .instance()
-            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+    }
+
+    fn extend_persistent_ttl<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
+        env: &Env,
+        key: &K,
+    ) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND);
     }
 
     pub fn initialize(
@@ -372,9 +519,13 @@ impl OnboardingBridge {
             },
         );
         env.storage().instance().set(&DataKey::FundingCount, &0u32);
+        env.storage().instance().set(&DataKey::HotCount, &0u32);
         env.storage().instance().set(&DataKey::NextArchiveId, &0u32);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::ProposalNonce, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveProposalIds, &Vec::<u32>::new(&env));
         env.storage().instance().set(&DataKey::NextPruneId, &1u32);
         env.storage()
             .instance()
@@ -387,19 +538,17 @@ impl OnboardingBridge {
         env.storage()
             .instance()
             .set(&DataKey::UniqueFunderCount, &0u64);
+        Self::extend_ttl(&env);
 
-        env.events().publish(
-            (Symbol::new(&env, "initialize"),),
-            (
-                admins,
-                threshold,
-                fee_bps,
-                max_fee_bps,
-                min_amount,
-                max_amount,
-            ),
-        );
-        Ok(())
+        Initialized {
+            admins,
+            threshold,
+            fee_bps,
+            max_fee_bps,
+            min_amount,
+            max_amount,
+        }
+        .publish(&env);
     }
 
     // -----------------------------------------------------------------------
@@ -416,6 +565,7 @@ impl OnboardingBridge {
     }
 
     pub fn initialization_params(env: Env) -> InitializationParams {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::InitializationParams)
@@ -433,20 +583,23 @@ impl OnboardingBridge {
     }
 
     pub fn is_fee_token_whitelisted(env: Env, token_address: Address) -> bool {
+        Self::extend_ttl(&env);
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::FeeTokenWhitelist(token_address))
             .unwrap_or(false)
     }
 
     pub fn fee_token_rate(env: Env, token_address: Address) -> u32 {
+        Self::extend_ttl(&env);
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::FeeTokenRate(token_address))
             .unwrap_or(10000)
     }
 
     pub fn accumulated_fees_for_token(env: Env, token_address: Address) -> i128 {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::AccumulatedFeesByToken(token_address))
@@ -456,13 +609,15 @@ impl OnboardingBridge {
     /// Returns the total volume funded for a specific token.
     /// Use this instead of accumulated_fees() when operating with multiple token types.
     pub fn total_volume_for_token(env: Env, token_address: Address) -> i128 {
+        Self::extend_ttl(&env);
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::TotalVolumeByToken(token_address))
             .unwrap_or(0)
     }
 
     pub fn max_fee_bps(env: Env) -> u32 {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::MaxFeeBps)
@@ -470,6 +625,7 @@ impl OnboardingBridge {
     }
 
     pub fn min_amount(env: Env) -> i128 {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::MinAmount)
@@ -477,21 +633,24 @@ impl OnboardingBridge {
     }
 
     pub fn max_amount(env: Env) -> i128 {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::MaxAmount)
             .unwrap_or(i128::MAX)
     }
 
-    pub fn user_volume(env: Env, user: Address) -> i128 {
+    pub fn user_volume(env: Env, user: Address, token: Address) -> i128 {
+        Self::extend_ttl(&env);
         env.storage()
-            .instance()
-            .get(&DataKey::UserVolume(user))
+            .persistent()
+            .get(&DataKey::UserVolume(user, token))
             .unwrap_or(0)
     }
 
-    pub fn rebate_for(env: Env, user: Address) -> u32 {
-        rebate_bps(&env, &user)
+    pub fn rebate_for(env: Env, user: Address, token: Address) -> u32 {
+        Self::extend_ttl(&env);
+        rebate_bps(&env, &user, &token)
     }
 
     /// Returns the total unclaimed fees accumulated in the contract (stroops).
@@ -507,20 +666,23 @@ impl OnboardingBridge {
     }
 
     pub fn is_paused(env: Env) -> bool {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
     }
 
-    pub fn get_admins(env: Env) -> Result<Vec<Address>, BridgeError> {
+    pub fn get_admins(env: Env) -> Vec<Address> {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::Admins)
             .ok_or(BridgeError::NotInitialized)
     }
 
-    pub fn get_threshold(env: Env) -> Result<u32, BridgeError> {
+    pub fn get_threshold(env: Env) -> u32 {
+        Self::extend_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::Threshold)
@@ -529,6 +691,7 @@ impl OnboardingBridge {
 
     /// #20: Batch analytics view — returns all counters in one call.
     pub fn get_stats(env: Env) -> Stats {
+        Self::extend_ttl(&env);
         Stats {
             total_volume: env
                 .storage()
@@ -608,12 +771,14 @@ impl OnboardingBridge {
             return Err(BridgeError::AmountAboveMaximum);
         }
         // Guard: amount must not overflow the fee multiplication.
-        if amount > MAX_SAFE_AMOUNT {
-            return Err(BridgeError::AmountTooLarge);
-        }
+        assert!(
+            amount <= MAX_SAFE_AMOUNT,
+            "amount too large: would overflow fee calculation"
+        );
+        assert!(memo.len() <= MAX_MEMO_BYTES, "memo exceeds maximum length");
 
         let fee_bps: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
-        let discount = rebate_bps(env, source);
+        let discount = rebate_bps(env, source, token_address);
         let effective_fee_bps = fee_bps.saturating_sub(fee_bps * discount / 10000);
         let fee = if effective_fee_bps > 0 {
             (amount * effective_fee_bps as i128) / 10000
@@ -650,9 +815,10 @@ impl OnboardingBridge {
         }
         tk.transfer(&env.current_contract_address(), target, &net_amount);
 
-        let vol_key = DataKey::UserVolume(source.clone());
-        let vol: i128 = env.storage().instance().get(&vol_key).unwrap_or(0);
-        env.storage().instance().set(&vol_key, &(vol + amount));
+        let vol_key = DataKey::UserVolume(source.clone(), token_address.clone());
+        let vol: i128 = env.storage().persistent().get(&vol_key).unwrap_or(0);
+        env.storage().persistent().set(&vol_key, &(vol + amount));
+        Self::extend_persistent_ttl(env, &vol_key);
 
         let count: u32 = env
             .storage()
@@ -677,6 +843,14 @@ impl OnboardingBridge {
             .persistent()
             .extend_ttl(&DataKey::Funding(id), TTL_THRESHOLD, TTL_EXTEND);
         env.storage().instance().set(&DataKey::FundingCount, &id);
+        let hot_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::HotCount)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::HotCount, &(hot_count + 1));
 
         // #20: increment analytics counters atomically
         let total_vol: i128 = env
@@ -690,10 +864,15 @@ impl OnboardingBridge {
 
         // Track per-token volume separately for meaningful multi-token analytics
         let token_vol_key = DataKey::TotalVolumeByToken(token_address.clone());
-        let token_vol: i128 = env.storage().instance().get(&token_vol_key).unwrap_or(0);
+        let token_vol: i128 = env
+            .storage()
+            .persistent()
+            .get(&token_vol_key)
+            .unwrap_or(0);
         env.storage()
-            .instance()
+            .persistent()
             .set(&token_vol_key, &(token_vol + amount));
+        Self::extend_persistent_ttl(env, &token_vol_key);
 
         let unique_key = DataKey::UniqueFunder(source.clone());
         if !env.storage().persistent().has(&unique_key) {
@@ -708,10 +887,15 @@ impl OnboardingBridge {
                 .set(&DataKey::UniqueFunderCount, &(uc + 1));
         }
 
-        env.events().publish(
-            (Symbol::new(env, "funded"),),
-            (source.clone(), target.clone(), amount, fee, discount),
-        );
+        Funded {
+            source: source.clone(),
+            target: target.clone(),
+            token: token_address.clone(),
+            amount,
+            fee,
+            discount,
+        }
+        .publish(env);
 
         Ok(fee)
     }
@@ -753,10 +937,12 @@ impl OnboardingBridge {
             )?;
         }
 
-        env.events().publish(
-            (Symbol::new(&env, "batch_funded"),),
-            (source, count, total_fees),
-        );
+        BatchFunded {
+            source,
+            count,
+            total_fees,
+        }
+        .publish(&env);
 
         Self::clear_reentrancy_guard(&env);
         Ok((total_fees, count))
@@ -820,6 +1006,16 @@ impl OnboardingBridge {
                 .persistent()
                 .get::<DataKey, FundingRecord>(&DataKey::Funding(i))
             {
+                if !record.archived {
+                    let hot_count: u32 = env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::HotCount)
+                        .unwrap_or(0);
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::HotCount, &hot_count.saturating_sub(1));
+                }
                 record.archived = true;
                 hash_bytes.append(&record.source.to_string().to_bytes());
                 hash_bytes.append(&record.target.to_string().to_bytes());
@@ -855,10 +1051,11 @@ impl OnboardingBridge {
             .instance()
             .set(&DataKey::NextArchiveId, &(archive_id + 1));
 
-        env.events().publish(
-            (Symbol::new(env, "archived"),),
-            (archive_count, hash_val.clone()),
-        );
+        Archived {
+            archive_count,
+            hash: hash_val.clone(),
+        }
+        .publish(env);
 
         Ok(hash_val)
     }
@@ -884,28 +1081,17 @@ impl OnboardingBridge {
             .get(&DataKey::AccumulatedFees)
             .unwrap_or(0);
 
-        let mut hot_count: u32 = 0;
-        for i in 1..=funding_count {
-            if let Some(record) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, FundingRecord>(&DataKey::Funding(i))
-            {
-                if !record.archived {
-                    hot_count += 1;
-                }
-            }
-        }
+        let hot_count = env
+            .storage()
+            .instance()
+            .get(&DataKey::HotCount)
+            .unwrap_or(0);
 
         (funding_count, archived_count, accumulated_fees, hot_count)
     }
 
-    pub fn propose(
-        env: Env,
-        proposer: Address,
-        action: ProposalAction,
-        expiry_blocks: u32,
-    ) -> Result<u32, BridgeError> {
+    pub fn propose(env: Env, proposer: Address, action: ProposalAction, expiry_blocks: u32) -> u32 {
+        Self::extend_ttl(&env);
         proposer.require_auth();
 
         let admins: Vec<Address> = env
@@ -932,7 +1118,8 @@ impl OnboardingBridge {
         let current_block = env.ledger().sequence();
 
         let approval_key = DataKey::ProposalApproval(proposal_id, proposer.clone());
-        env.storage().instance().set(&approval_key, &true);
+        env.storage().persistent().set(&approval_key, &true);
+        Self::extend_persistent_ttl(&env, &approval_key);
 
         let proposal = Proposal {
             id: proposal_id,
@@ -944,22 +1131,34 @@ impl OnboardingBridge {
             proposed_at: current_block,
         };
 
-        env.storage()
-            .instance()
-            .set(&DataKey::Proposal(proposal_id), &proposal);
+        let proposal_key = DataKey::Proposal(proposal_id);
+        env.storage().persistent().set(&proposal_key, &proposal);
+        Self::extend_persistent_ttl(&env, &proposal_key);
         env.storage()
             .instance()
             .set(&DataKey::ProposalNonce, &proposal_id);
+        let mut active_ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveProposalIds)
+            .unwrap_or(Vec::new(&env));
+        active_ids.push_back(proposal_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveProposalIds, &active_ids);
 
-        env.events().publish(
-            (Symbol::new(&env, "proposed"),),
-            (proposal_id, proposer, current_block + expiry_blocks),
-        );
+        Proposed {
+            proposal_id,
+            proposer,
+            expiry: current_block + expiry_blocks,
+        }
+        .publish(&env);
 
         Ok(proposal_id)
     }
 
-    pub fn approve(env: Env, admin: Address, proposal_id: u32) -> Result<(), BridgeError> {
+    pub fn approve(env: Env, admin: Address, proposal_id: u32) {
+        Self::extend_ttl(&env);
         admin.require_auth();
 
         let admins: Vec<Address> = env
@@ -973,7 +1172,7 @@ impl OnboardingBridge {
 
         let mut proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(BridgeError::ProposalNotFound)?;
 
@@ -985,24 +1184,28 @@ impl OnboardingBridge {
         }
 
         let approval_key = DataKey::ProposalApproval(proposal_id, admin.clone());
-        if env.storage().instance().has(&approval_key) {
-            return Err(BridgeError::AlreadyApproved);
-        }
-        env.storage().instance().set(&approval_key, &true);
+        assert!(
+            !env.storage().persistent().has(&approval_key),
+            "already approved this proposal"
+        );
+        env.storage().persistent().set(&approval_key, &true);
+        Self::extend_persistent_ttl(&env, &approval_key);
 
         proposal.approval_count += 1;
-        env.storage()
-            .instance()
-            .set(&DataKey::Proposal(proposal_id), &proposal);
+        let proposal_key = DataKey::Proposal(proposal_id);
+        env.storage().persistent().set(&proposal_key, &proposal);
+        Self::extend_persistent_ttl(&env, &proposal_key);
 
-        env.events().publish(
-            (Symbol::new(&env, "approved"),),
-            (proposal_id, admin, proposal.approval_count),
-        );
-        Ok(())
+        Approved {
+            proposal_id,
+            admin,
+            approval_count: proposal.approval_count,
+        }
+        .publish(&env);
     }
 
-    pub fn execute(env: Env, proposal_id: u32) -> Result<i128, BridgeError> {
+    pub fn execute(env: Env, proposal_id: u32) -> i128 {
+        Self::extend_ttl(&env);
         let threshold: u32 = env
             .storage()
             .instance()
@@ -1011,7 +1214,7 @@ impl OnboardingBridge {
 
         let proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(BridgeError::ProposalNotFound)?;
 
@@ -1043,9 +1246,25 @@ impl OnboardingBridge {
 
         let mut executed_proposal = proposal.clone();
         executed_proposal.executed = true;
+        let proposal_key = DataKey::Proposal(proposal_id);
+        env.storage().persistent().set(&proposal_key, &executed_proposal);
+        Self::extend_persistent_ttl(&env, &proposal_key);
+        let mut active_ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveProposalIds)
+            .unwrap_or(Vec::new(&env));
+        let mut remaining_ids = Vec::new(&env);
+        for i in 0..active_ids.len() {
+            let id = active_ids.get_unchecked(i);
+            if id != proposal_id {
+                remaining_ids.push_back(id);
+            }
+        }
+        active_ids = remaining_ids;
         env.storage()
             .instance()
-            .set(&DataKey::Proposal(proposal_id), &executed_proposal);
+            .set(&DataKey::ActiveProposalIds, &active_ids);
 
         let result = match proposal.action {
             ProposalAction::SetFee(new_fee_bps) => {
@@ -1069,14 +1288,16 @@ impl OnboardingBridge {
                     .instance()
                     .set(&DataKey::InitializationParams, &params);
 
-                env.events()
-                    .publish((Symbol::new(&env, "set_fee"),), (new_fee_bps,));
+                SetFee {
+                    fee_bps: new_fee_bps,
+                }
+                .publish(&env);
                 0i128
             }
             ProposalAction::SetFeeTokenWhitelist(token, enabled) => {
-                env.storage()
-                    .instance()
-                    .set(&DataKey::FeeTokenWhitelist(token.clone()), &enabled);
+                let key = DataKey::FeeTokenWhitelist(token.clone());
+                env.storage().persistent().set(&key, &enabled);
+                Self::extend_persistent_ttl(&env, &key);
                 env.events().publish(
                     (Symbol::new(&env, "set_fee_token_whitelist"),),
                     (token, enabled),
@@ -1084,15 +1305,11 @@ impl OnboardingBridge {
                 0i128
             }
             ProposalAction::SetFeeTokenRate(token, rate) => {
-                if rate < 1000 {
-                    return Err(BridgeError::RateBelowMinimum);
-                }
-                if rate > 20000 {
-                    return Err(BridgeError::RateAboveMaximum);
-                }
-                env.storage()
-                    .instance()
-                    .set(&DataKey::FeeTokenRate(token.clone()), &rate);
+                assert!(rate >= 1000, "rate must be >= 1000");
+                assert!(rate <= 20000, "rate must be <= 20000");
+                let key = DataKey::FeeTokenRate(token.clone());
+                env.storage().persistent().set(&key, &rate);
+                Self::extend_persistent_ttl(&env, &key);
                 env.events()
                     .publish((Symbol::new(&env, "set_fee_token_rate"),), (token, rate));
                 0i128
@@ -1113,20 +1330,22 @@ impl OnboardingBridge {
                     .set(&DataKey::AccumulatedFees, &remaining);
                 let tk = token::Client::new(&env, &token);
                 tk.transfer(&env.current_contract_address(), &to, &withdraw_amount);
-                env.events().publish(
-                    (Symbol::new(&env, "withdrawn"),),
-                    (to, token, withdraw_amount),
-                );
+                Withdrawn {
+                    to,
+                    token,
+                    amount: withdraw_amount,
+                }
+                .publish(&env);
                 withdraw_amount
             }
             ProposalAction::Pause => {
                 env.storage().instance().set(&DataKey::Paused, &true);
-                env.events().publish((Symbol::new(&env, "paused"),), ());
+                Paused.publish(&env);
                 0i128
             }
             ProposalAction::Unpause => {
                 env.storage().instance().set(&DataKey::Paused, &false);
-                env.events().publish((Symbol::new(&env, "unpaused"),), ());
+                Unpaused.publish(&env);
                 0i128
             }
             ProposalAction::RotateAdmins(new_admins) => {
@@ -1143,10 +1362,10 @@ impl OnboardingBridge {
                     return Err(BridgeError::ThresholdExceedsAdminCount);
                 }
                 env.storage().instance().set(&DataKey::Admins, &new_admins);
-                env.events().publish(
-                    (Symbol::new(&env, "admins_rotated"),),
-                    (new_admins.clone(),),
-                );
+                AdminsRotated {
+                    admins: new_admins.clone(),
+                }
+                .publish(&env);
                 0i128
             }
             ProposalAction::SetThreshold(new_threshold) => {
@@ -1164,8 +1383,10 @@ impl OnboardingBridge {
                 env.storage()
                     .instance()
                     .set(&DataKey::Threshold, &new_threshold);
-                env.events()
-                    .publish((Symbol::new(&env, "threshold_set"),), (new_threshold,));
+                ThresholdSet {
+                    threshold: new_threshold,
+                }
+                .publish(&env);
                 0i128
             }
             ProposalAction::ArchiveOldEntries(count) => {
@@ -1173,18 +1394,16 @@ impl OnboardingBridge {
                 0i128
             }
             ProposalAction::SetRebateTier(tier_index, threshold, discount_bps) => {
-                if discount_bps > 5000 {
-                    return Err(BridgeError::DiscountTooHigh);
-                }
-                if tier_index >= MAX_TIERS {
-                    return Err(BridgeError::TierCapExceeded);
-                }
+                assert!(discount_bps <= 5000, "discount capped at 50%");
+                assert!(tier_index < MAX_TIERS, "{}", ERR_TIER_CAP_EXCEEDED);
+                let threshold_key = DataKey::TierThreshold(tier_index);
+                let discount_key = DataKey::TierDiscount(tier_index);
+                env.storage().persistent().set(&threshold_key, &threshold);
                 env.storage()
-                    .instance()
-                    .set(&DataKey::TierThreshold(tier_index), &threshold);
-                env.storage()
-                    .instance()
-                    .set(&DataKey::TierDiscount(tier_index), &discount_bps);
+                    .persistent()
+                    .set(&discount_key, &discount_bps);
+                Self::extend_persistent_ttl(&env, &threshold_key);
+                Self::extend_persistent_ttl(&env, &discount_key);
                 let count: u32 = env
                     .storage()
                     .instance()
@@ -1195,16 +1414,17 @@ impl OnboardingBridge {
                         .instance()
                         .set(&DataKey::TierCount, &(tier_index + 1));
                 }
-                env.events().publish(
-                    (Symbol::new(&env, "tier_set"),),
-                    (tier_index, threshold, discount_bps),
-                );
+                TierSet {
+                    tier_index,
+                    threshold,
+                    discount_bps,
+                }
+                .publish(&env);
                 0i128
             }
         };
 
-        env.events()
-            .publish((Symbol::new(&env, "executed"),), (proposal_id,));
+        Executed { proposal_id }.publish(&env);
 
         Ok(result)
     }
@@ -1217,25 +1437,31 @@ impl OnboardingBridge {
     }
 
     pub fn get_active_proposals(env: Env) -> Vec<Proposal> {
-        let nonce: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::ProposalNonce)
-            .unwrap_or(0);
         let current_block = env.ledger().sequence();
         let mut active: Vec<Proposal> = Vec::new(&env);
+        let mut active_ids = Vec::new(&env);
+        let proposal_ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveProposalIds)
+            .unwrap_or(Vec::new(&env));
 
-        for i in 1..=nonce {
+        for i in 0..proposal_ids.len() {
+            let proposal_id = proposal_ids.get_unchecked(i);
             if let Some(proposal) = env
                 .storage()
-                .instance()
-                .get::<DataKey, Proposal>(&DataKey::Proposal(i))
+                .persistent()
+                .get::<DataKey, Proposal>(&DataKey::Proposal(proposal_id))
             {
                 if !proposal.executed && current_block <= proposal.expiry {
                     active.push_back(proposal);
+                    active_ids.push_back(proposal_id);
                 }
             }
         }
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveProposalIds, &active_ids);
 
         active
     }
@@ -1280,22 +1506,22 @@ impl OnboardingBridge {
         while cursor <= nonce && scanned < max_scan {
             match env
                 .storage()
-                .instance()
+                .persistent()
                 .get::<DataKey, Proposal>(&DataKey::Proposal(cursor))
             {
                 Some(proposal) => {
                     if proposal.executed || current_block > proposal.expiry {
-                        env.storage().instance().remove(&DataKey::Proposal(cursor));
+                        env.storage().persistent().remove(&DataKey::Proposal(cursor));
                         for i in 0..admins.len() {
                             let approval_key =
                                 DataKey::ProposalApproval(cursor, admins.get_unchecked(i));
-                            env.storage().instance().remove(&approval_key);
+                            env.storage().persistent().remove(&approval_key);
                         }
                         // The proposer always has an approval flag from
                         // `propose`, even if no longer an admin by the time
                         // this runs — clear it explicitly so it can't linger.
                         env.storage()
-                            .instance()
+                            .persistent()
                             .remove(&DataKey::ProposalApproval(cursor, proposal.proposer));
                         pruned += 1;
                         cursor += 1;
@@ -1315,8 +1541,7 @@ impl OnboardingBridge {
 
         env.storage().instance().set(&DataKey::NextPruneId, &cursor);
 
-        env.events()
-            .publish((Symbol::new(&env, "proposals_pruned"),), (pruned, cursor));
+        ProposalsPruned { pruned, cursor }.publish(&env);
 
         Ok(pruned)
     }

@@ -618,6 +618,38 @@ fn test_end_to_end_fund_with_real_token_transfer() {
     assert_eq!(bridge.accumulated_fees(), 10);
 }
 
+#[test]
+#[should_panic]
+fn test_fund_c_address_rejects_token_only_authorization() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 10000);
+    let source = Address::generate(&env);
+    let token = register_test_token(&env);
+    let target = register_test_token(&env);
+    let amount = 1000i128;
+    token_mint(&env, &token, &source, amount);
+
+    let transfer = MockAuthInvoke {
+        contract: &token,
+        fn_name: "transfer",
+        args: Vec::from_array(
+            &env,
+            [
+                source.clone().into_val(&env),
+                MuxedAddress::from(bridge.address.clone()).into_val(&env),
+                amount.into_val(&env),
+            ],
+        ),
+        sub_invokes: &[],
+    };
+    env.mock_auths(&[MockAuth {
+        address: &source,
+        invoke: &transfer,
+    }]);
+
+    let memo = String::from_str(&env, "auth-bound");
+    bridge.fund_c_address(&source, &target, &token, &amount, &memo);
+}
+
 /// Multi-token flow: two different tokens bridged through same contract.
 #[test]
 fn test_multi_token_flow() {
@@ -870,6 +902,24 @@ fn test_route_from_exchange_blocked_when_paused() {
     let token_addr = Address::generate(&env);
     let memo = String::from_str(&env, "test");
     bridge.route_from_exchange(&exchange, &target, &token_addr, &1000, &memo);
+}
+
+#[test]
+#[should_panic]
+fn test_batch_fund_blocked_when_paused() {
+    let (env, bridge, admins) = setup_env_with_admins(2, 2, 100, 1000);
+
+    let pid = bridge.propose(&admins.get_unchecked(0), &ProposalAction::Pause, &1000);
+    bridge.approve(&admins.get_unchecked(1), &pid);
+    advance_ledger(&env, MIN_EXEC_DELAY);
+    bridge.execute(&pid);
+
+    let source = Address::generate(&env);
+    let targets = Vec::from_array(&env, [register_test_token(&env)]);
+    let tokens = Vec::from_array(&env, [register_test_token(&env)]);
+    let amounts = Vec::from_array(&env, [1000i128]);
+    let memos = Vec::from_array(&env, [String::from_str(&env, "paused")]);
+    bridge.batch_fund_c_address(&source, &targets, &tokens, &amounts, &memos);
 }
 
 #[test]
@@ -1399,6 +1449,30 @@ fn test_rotate_admins_removes_old_admin_privileges() {
 }
 
 #[test]
+#[should_panic(expected = "insufficient approvals")]
+fn test_removed_admin_approval_does_not_count_for_pending_proposal() {
+    let (env, bridge, admins) = setup_env_with_admins(2, 2, 100, 1000);
+    let removed_admin = admins.get_unchecked(1);
+
+    let pending = bridge.propose(&admins.get_unchecked(0), &ProposalAction::SetFee(200), &1000);
+    bridge.approve(&removed_admin, &pending);
+
+    let new_admin = Address::generate(&env);
+    let mut new_admins: Vec<Address> = Vec::new(&env);
+    new_admins.push_back(admins.get_unchecked(0));
+    new_admins.push_back(new_admin);
+    let rotation = bridge.propose(
+        &admins.get_unchecked(0),
+        &ProposalAction::RotateAdmins(new_admins),
+        &1000,
+    );
+    bridge.approve(&removed_admin, &rotation);
+    bridge.execute(&rotation);
+
+    bridge.execute(&pending);
+}
+
+#[test]
 fn test_rotate_admins_new_admin_can_govern() {
     let (env, bridge, admins) = setup_env_with_admins(2, 2, 100, 1000);
     let new_admin = Address::generate(&env);
@@ -1555,7 +1629,8 @@ fn test_initialize() {
 }
 
 #[test]
-fn test_double_initialize_is_noop() {
+#[should_panic(expected = "contract already initialized")]
+fn test_double_initialize_fails() {
     let (env, bridge) = setup_env();
     let admins = create_admins(&env, 2);
     bridge.initialize(&admins, &2, &30, &1000, &1, &i128::MAX);

@@ -4,7 +4,7 @@ extern crate std;
 
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     Address, Env, IntoVal, MuxedAddress, String, Symbol, Vec,
 };
 
@@ -408,6 +408,36 @@ fn test_stats_after_single_fund() {
 }
 
 #[test]
+fn test_funded_event_topics_include_source_target_and_token() {
+    let (env, bridge, token, _) = full_setup(100);
+    let source = Address::generate(&env);
+    let target = Address::generate(&env);
+    let memo = String::from_str(&env, "test");
+    TestTokenClient::new(&env, &token).mint(&source, &2000);
+
+    bridge.fund_c_address(&source, &target, &token, &1000, &memo);
+
+    let topics = Vec::from_array(
+        &env,
+        [
+            Symbol::new(&env, "funded").into_val(&env),
+            source.into_val(&env),
+            target.into_val(&env),
+            token.into_val(&env),
+        ],
+    );
+    let data = Vec::from_array(
+        &env,
+        [1000i128.into_val(&env), 10i128.into_val(&env), 0u32.into_val(&env)],
+    );
+
+    assert_eq!(
+        env.events().all(),
+        std::vec![(env.current_contract_address(), topics, data.into_val(&env))]
+    );
+}
+
+#[test]
 fn test_stats_accumulate_across_fundings() {
     let (env, bridge, token, _) = full_setup(200); // 2%
     let source = Address::generate(&env);
@@ -668,7 +698,7 @@ fn test_transfer_from_insufficient_allowance() {
 // ===========================================================================
 
 #[test]
-#[should_panic(expected = "max_fee_bps must be <= 10000")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn test_initialize_validates_max_fee_bps() {
     let (env, bridge) = setup_env();
     let admins = create_admins(&env, 2);
@@ -676,7 +706,22 @@ fn test_initialize_validates_max_fee_bps() {
 }
 
 #[test]
-#[should_panic(expected = "fee_bps must be <= max_fee_bps")]
+fn test_invalid_c_address_returns_stable_error_code() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    let source = Address::generate(&env);
+    let target = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+    let memo = String::from_str(&env, "test");
+
+    let result = bridge
+        .try_fund_c_address(&source, &target, &token_addr, &1000, &memo)
+        .unwrap();
+
+    assert_eq!(result, Err(BridgeError::InvalidCAddress));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_initialize_validates_fee_vs_max_fee() {
     let (env, bridge) = setup_env();
     let admins = create_admins(&env, 2);
@@ -684,7 +729,7 @@ fn test_initialize_validates_fee_vs_max_fee() {
 }
 
 #[test]
-#[should_panic(expected = "threshold must be > 0")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_initialize_validates_threshold_zero() {
     let (env, bridge) = setup_env();
     let admins = create_admins(&env, 2);
@@ -692,7 +737,7 @@ fn test_initialize_validates_threshold_zero() {
 }
 
 #[test]
-#[should_panic(expected = "threshold exceeds admin count")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_initialize_validates_threshold_exceeds() {
     let (env, bridge) = setup_env();
     let admins = create_admins(&env, 2);
@@ -700,7 +745,7 @@ fn test_initialize_validates_threshold_exceeds() {
 }
 
 #[test]
-#[should_panic(expected = "admins must not be empty")]
+#[should_panic(expected = "Error(Contract, #2)")]
 fn test_initialize_validates_admins_not_empty() {
     let (env, bridge) = setup_env();
     let empty: Vec<Address> = Vec::new(&env);
@@ -708,7 +753,7 @@ fn test_initialize_validates_admins_not_empty() {
 }
 
 #[test]
-#[should_panic(expected = "admin address cannot be the contract address")]
+#[should_panic(expected = "Error(Contract, #9)")]
 fn test_initialize_rejects_admin_equal_to_contract_address() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -721,7 +766,7 @@ fn test_initialize_rejects_admin_equal_to_contract_address() {
 }
 
 #[test]
-#[should_panic(expected = "amount must be positive")]
+#[should_panic(expected = "Error(Contract, #11)")]
 fn test_fund_c_address_zero_amount() {
     let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
     let source = Address::generate(&env);
@@ -732,7 +777,7 @@ fn test_fund_c_address_zero_amount() {
 }
 
 #[test]
-#[should_panic(expected = "amount must be positive")]
+#[should_panic(expected = "Error(Contract, #11)")]
 fn test_fund_c_address_negative_amount() {
     let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
     let source = Address::generate(&env);
@@ -740,6 +785,20 @@ fn test_fund_c_address_negative_amount() {
     let token_addr = Address::generate(&env);
     let memo = String::from_str(&env, "test");
     bridge.fund_c_address(&source, &target, &token_addr, &-1, &memo);
+}
+
+#[test]
+#[should_panic(expected = "memo exceeds maximum length")]
+fn test_fund_c_address_rejects_oversized_memo() {
+    let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
+    let source = Address::generate(&env);
+    let target = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+    let memo = String::from_str(
+        &env,
+        "12345678901234567890123456789012345678901234567890123456789012345",
+    );
+    bridge.fund_c_address(&source, &target, &token_addr, &1, &memo);
 }
 
 #[test]
@@ -780,7 +839,7 @@ fn test_pause_and_unpause() {
 }
 
 #[test]
-#[should_panic(expected = "contract is paused")]
+#[should_panic(expected = "Error(Contract, #12)")]
 fn test_fund_c_address_blocked_when_paused() {
     let (env, bridge, admins) = setup_env_with_admins(2, 2, 100, 1000);
 
@@ -797,7 +856,7 @@ fn test_fund_c_address_blocked_when_paused() {
 }
 
 #[test]
-#[should_panic(expected = "contract is paused")]
+#[should_panic(expected = "Error(Contract, #12)")]
 fn test_route_from_exchange_blocked_when_paused() {
     let (env, bridge, admins) = setup_env_with_admins(2, 2, 100, 1000);
 
@@ -870,7 +929,7 @@ fn test_max_fee_bps_immutable_after_init() {
 }
 
 #[test]
-#[should_panic(expected = "fee exceeds max_fee_bps")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_set_fee_rejects_above_max() {
     let (env, bridge, admins) = setup_env_with_admins(2, 2, 50, 500);
 
@@ -984,7 +1043,7 @@ fn test_execute_with_threshold() {
 }
 
 #[test]
-#[should_panic(expected = "insufficient approvals")]
+#[should_panic(expected = "Error(Contract, #28)")]
 fn test_execute_fails_without_threshold() {
     let (_env, bridge, admins) = setup_env_with_admins(2, 2, 100, 1000);
     let proposer = admins.get_unchecked(0);
@@ -994,7 +1053,7 @@ fn test_execute_fails_without_threshold() {
 }
 
 #[test]
-#[should_panic(expected = "already approved this proposal")]
+#[should_panic(expected = "Error(Contract, #27)")]
 fn test_double_approve_rejected() {
     let (_env, bridge, admins) = setup_env_with_admins(3, 2, 100, 1000);
     let proposer = admins.get_unchecked(0);
@@ -1005,7 +1064,7 @@ fn test_double_approve_rejected() {
 }
 
 #[test]
-#[should_panic(expected = "proposal expired")]
+#[should_panic(expected = "Error(Contract, #25)")]
 fn test_proposal_expiry() {
     let (env, bridge, admins) = setup_env_with_admins(2, 2, 100, 1000);
     let proposer = admins.get_unchecked(0);
@@ -1019,7 +1078,7 @@ fn test_proposal_expiry() {
 }
 
 #[test]
-#[should_panic(expected = "only admins can propose")]
+#[should_panic(expected = "Error(Contract, #20)")]
 fn test_non_admin_cannot_propose() {
     let (env, bridge, _admins) = setup_env_with_admins(2, 2, 100, 1000);
     let non_admin = Address::generate(&env);
@@ -1028,7 +1087,7 @@ fn test_non_admin_cannot_propose() {
 }
 
 #[test]
-#[should_panic(expected = "only admins can approve")]
+#[should_panic(expected = "Error(Contract, #23)")]
 fn test_non_admin_cannot_approve() {
     let (env, bridge, admins) = setup_env_with_admins(2, 2, 100, 1000);
     let non_admin = Address::generate(&env);
@@ -1267,7 +1326,7 @@ fn test_proposal_withdraw_all_fees() {
 }
 
 #[test]
-#[should_panic(expected = "insufficient accumulated fees")]
+#[should_panic(expected = "Error(Contract, #32)")]
 fn test_proposal_withdraw_excessive_fees_rejected() {
     let (env, bridge, admins) = setup_env_with_admins(2, 2, 100, 1000);
 
@@ -1319,7 +1378,7 @@ fn test_rotate_admins_happy_path() {
 }
 
 #[test]
-#[should_panic(expected = "only admins can propose")]
+#[should_panic(expected = "Error(Contract, #20)")]
 fn test_rotate_admins_removes_old_admin_privileges() {
     let (env, bridge, admins) = setup_env_with_admins(2, 2, 100, 1000);
     let removed_admin = admins.get_unchecked(1);
@@ -1364,7 +1423,7 @@ fn test_rotate_admins_new_admin_can_govern() {
 }
 
 #[test]
-#[should_panic(expected = "threshold exceeds admin count")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_rotate_admins_rejects_below_current_threshold() {
     let (env, bridge, admins) = setup_env_with_admins(3, 3, 100, 1000);
     // Threshold is 3, but the new admin set only has 2 members.
@@ -1383,7 +1442,7 @@ fn test_rotate_admins_rejects_below_current_threshold() {
 }
 
 #[test]
-#[should_panic(expected = "admins must not be empty")]
+#[should_panic(expected = "Error(Contract, #2)")]
 fn test_rotate_admins_rejects_empty() {
     let (env, bridge, admins) = setup_env_with_admins(1, 1, 100, 1000);
     let empty: Vec<Address> = Vec::new(&env);
@@ -1397,7 +1456,7 @@ fn test_rotate_admins_rejects_empty() {
 }
 
 #[test]
-#[should_panic(expected = "admin address cannot be the contract address")]
+#[should_panic(expected = "Error(Contract, #9)")]
 fn test_rotate_admins_rejects_contract_address_as_admin() {
     let (env, bridge, admins) = setup_env_with_admins(1, 1, 100, 1000);
     let bridge_address = bridge.address.clone();
@@ -1428,7 +1487,7 @@ fn test_set_threshold_happy_path() {
 }
 
 #[test]
-#[should_panic(expected = "threshold must be > 0")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_set_threshold_rejects_zero() {
     let (_env, bridge, admins) = setup_env_with_admins(2, 2, 100, 1000);
 
@@ -1442,7 +1501,7 @@ fn test_set_threshold_rejects_zero() {
 }
 
 #[test]
-#[should_panic(expected = "threshold exceeds admin count")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_set_threshold_rejects_above_admin_count() {
     let (_env, bridge, admins) = setup_env_with_admins(2, 2, 100, 1000);
 
@@ -1658,7 +1717,7 @@ fn test_is_valid_c_address_false() {
 }
 
 #[test]
-#[should_panic(expected = "invalid c-address: not a contract address")]
+#[should_panic(expected = "Error(Contract, #10)")]
 fn test_fund_c_address_rejects_account_target() {
     let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
     let source = Address::generate(&env);
@@ -1669,7 +1728,7 @@ fn test_fund_c_address_rejects_account_target() {
 }
 
 #[test]
-#[should_panic(expected = "invalid c-address: not a contract address")]
+#[should_panic(expected = "Error(Contract, #10)")]
 fn test_route_from_exchange_rejects_account_target() {
     let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
     let exchange = Address::generate(&env);
@@ -1713,7 +1772,7 @@ fn test_batch_fund_two_transfers() {
 }
 
 #[test]
-#[should_panic(expected = "batch inputs must not be empty")]
+#[should_panic(expected = "Error(Contract, #17)")]
 fn test_batch_fund_empty_fails() {
     let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
     let source = Address::generate(&env);
@@ -1726,7 +1785,7 @@ fn test_batch_fund_empty_fails() {
 }
 
 #[test]
-#[should_panic(expected = "batch input vectors must have same length")]
+#[should_panic(expected = "Error(Contract, #18)")]
 fn test_batch_fund_mismatched_lengths_fails() {
     let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
     let source = Address::generate(&env);
@@ -1941,7 +2000,7 @@ fn test_archive_old_entries() {
 }
 
 #[test]
-#[should_panic(expected = "no entries to archive")]
+#[should_panic(expected = "Error(Contract, #19)")]
 fn test_archive_no_entries_fails() {
     let (_env, bridge, admins) = setup_env_with_admins(1, 1, 100, 1000);
     let pid = bridge.propose(
@@ -2008,7 +2067,7 @@ fn test_archive_hash_differs_for_different_records() {
 }
 
 #[test]
-#[should_panic(expected = "insufficient approvals")]
+#[should_panic(expected = "Error(Contract, #28)")]
 fn test_archive_old_entries_requires_multisig() {
     // Test that a single admin cannot unilaterally trigger archival when threshold > 1
     let (env, bridge, admins) = setup_env_with_admins(3, 2, 100, 1000); // 3 admins, threshold 2
@@ -2150,9 +2209,9 @@ fn test_fund_c_address_normal_path_unaffected_by_guard() {
 /// Genuinely exercises the reentrancy guard: a malicious token's transfer()
 /// callback attempts to reenter `fund_c_address` on the bridge mid-call.
 /// The guard set in `fund_c_address` before invoking `tk.transfer` must
-/// cause the nested call to panic with ERR_REENTRANT_CALL.
+/// cause the nested call to fail with the stable reentrancy error code.
 #[test]
-#[should_panic(expected = "InvalidAction")]
+#[should_panic(expected = "Error(Contract, #16)")]
 fn test_reentrancy_guard_blocks_malicious_token_callback() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -2200,14 +2259,16 @@ fn test_max_amount_default() {
 fn test_user_volume_default() {
     let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
     let user = Address::generate(&env);
-    assert_eq!(bridge.user_volume(&user), 0);
+    let token = Address::generate(&env);
+    assert_eq!(bridge.user_volume(&user, &token), 0);
 }
 
 #[test]
 fn test_rebate_for_default() {
     let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
     let user = Address::generate(&env);
-    assert_eq!(bridge.rebate_for(&user), 0);
+    let token = Address::generate(&env);
+    assert_eq!(bridge.rebate_for(&user, &token), 0);
 }
 
 #[test]
@@ -2219,11 +2280,11 @@ fn test_set_rebate_tier_basic() {
         &1000,
     );
     bridge.execute(&pid);
-    assert_eq!(bridge.rebate_for(&Address::generate(&env)), 0);
-    assert_eq!(bridge.rebate_for(&admins.get_unchecked(0)), 0);
+    let token_addr = register_test_token(&env);
+    assert_eq!(bridge.rebate_for(&Address::generate(&env), &token_addr), 0);
+    assert_eq!(bridge.rebate_for(&admins.get_unchecked(0), &token_addr), 0);
     let user = Address::generate(&env);
     let target = Address::generate(&env);
-    let token_addr = register_test_token(&env);
     TestTokenClient::new(&env, &token_addr).mint(&user, &5000);
     bridge.fund_c_address(
         &user,
@@ -2232,11 +2293,11 @@ fn test_set_rebate_tier_basic() {
         &2000,
         &String::from_str(&env, "tier"),
     );
-    assert_eq!(bridge.rebate_for(&user), 100);
+    assert_eq!(bridge.rebate_for(&user, &token_addr), 100);
 }
 
 #[test]
-#[should_panic(expected = "discount capped at 50%")]
+#[should_panic(expected = "Error(Contract, #33)")]
 fn test_set_rebate_tier_rejects_discount_above_cap() {
     let (_env, bridge, admins) = setup_env_with_admins(1, 1, 100, 1000);
     let pid = bridge.propose(
@@ -2266,7 +2327,7 @@ fn test_set_rebate_tier_accepts_up_to_cap() {
 }
 
 #[test]
-#[should_panic(expected = "tier count exceeds maximum allowed")]
+#[should_panic(expected = "Error(Contract, #34)")]
 fn test_set_rebate_tier_rejects_beyond_cap() {
     let (_env, bridge, admins) = setup_env_with_admins(1, 1, 100, 1000);
     let pid = bridge.propose(
@@ -2278,7 +2339,7 @@ fn test_set_rebate_tier_rejects_beyond_cap() {
 }
 
 #[test]
-#[should_panic(expected = "tier count exceeds maximum allowed")]
+#[should_panic(expected = "Error(Contract, #34)")]
 fn test_set_rebate_tier_rejects_far_beyond_cap() {
     let (_env, bridge, admins) = setup_env_with_admins(1, 1, 100, 1000);
     let pid = bridge.propose(
@@ -2319,11 +2380,11 @@ fn test_set_rebate_tier_update_within_cap_still_allowed() {
         &2000,
         &String::from_str(&env, "tier"),
     );
-    assert_eq!(bridge.rebate_for(&user), 200);
+    assert_eq!(bridge.rebate_for(&user, &token_addr), 200);
 }
 
 #[test]
-#[should_panic(expected = "insufficient approvals")]
+#[should_panic(expected = "Error(Contract, #28)")]
 fn test_single_admin_cannot_set_rebate_tier() {
     // 2-of-2 multisig: a single admin proposing a rebate tier must not be
     // able to execute it without the second admin's approval.
@@ -2345,7 +2406,7 @@ fn test_user_volume_tracks_funding() {
     let token_addr = register_test_token(&env);
     TestTokenClient::new(&env, &token_addr).mint(&source, &10_000);
 
-    assert_eq!(bridge.user_volume(&source), 0);
+    assert_eq!(bridge.user_volume(&source, &token_addr), 0);
     bridge.fund_c_address(
         &source,
         &target,
@@ -2353,7 +2414,7 @@ fn test_user_volume_tracks_funding() {
         &1000,
         &String::from_str(&env, "vol test"),
     );
-    assert_eq!(bridge.user_volume(&source), 1000);
+    assert_eq!(bridge.user_volume(&source, &token_addr), 1000);
     bridge.fund_c_address(
         &source,
         &target,
@@ -2361,7 +2422,19 @@ fn test_user_volume_tracks_funding() {
         &2000,
         &String::from_str(&env, "vol test2"),
     );
-    assert_eq!(bridge.user_volume(&source), 3000);
+    assert_eq!(bridge.user_volume(&source, &token_addr), 3000);
+
+    let other_token = register_test_token(&env);
+    TestTokenClient::new(&env, &other_token).mint(&source, &4000);
+    bridge.fund_c_address(
+        &source,
+        &target,
+        &other_token,
+        &4000,
+        &String::from_str(&env, "other token"),
+    );
+    assert_eq!(bridge.user_volume(&source, &token_addr), 3000);
+    assert_eq!(bridge.user_volume(&source, &other_token), 4000);
 }
 
 #[test]
@@ -2374,7 +2447,7 @@ fn test_initialize_with_custom_amounts() {
 }
 
 #[test]
-#[should_panic(expected = "amount below minimum")]
+#[should_panic(expected = "Error(Contract, #13)")]
 fn test_fund_c_address_below_min_amount_panics() {
     let (env, bridge) = setup_env();
     let admins = create_admins(&env, 1);
@@ -2395,7 +2468,7 @@ fn test_fund_c_address_below_min_amount_panics() {
 }
 
 #[test]
-#[should_panic(expected = "amount above maximum")]
+#[should_panic(expected = "Error(Contract, #14)")]
 fn test_fund_c_address_above_max_amount_panics() {
     let (env, bridge) = setup_env();
     let admins = create_admins(&env, 1);
@@ -2477,7 +2550,7 @@ fn test_fee_token_rate_accepts_bounds() {
 }
 
 #[test]
-#[should_panic(expected = "rate must be >= 1000")]
+#[should_panic(expected = "Error(Contract, #30)")]
 fn test_fee_token_rate_rejects_below_min() {
     let (_env, bridge, token, admin) = full_setup(100);
     let pid = bridge.propose(
@@ -2489,7 +2562,7 @@ fn test_fee_token_rate_rejects_below_min() {
 }
 
 #[test]
-#[should_panic(expected = "rate must be <= 20000")]
+#[should_panic(expected = "Error(Contract, #31)")]
 fn test_fee_token_rate_rejects_above_max() {
     let (_env, bridge, token, admin) = full_setup(100);
     let pid = bridge.propose(

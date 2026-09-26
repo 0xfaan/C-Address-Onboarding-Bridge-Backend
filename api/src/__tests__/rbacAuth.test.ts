@@ -43,7 +43,7 @@ function mockRes(): { res: Response; status: ReturnType<typeof vi.fn>; json: Ret
 }
 
 describe('createApiKey / rbacAuth', () => {
-  it.skip('creates a key and allows valid request', () => {
+  it('creates a key and allows valid request', () => {
     const { rawKey } = createApiKey({
       name: 'test-key',
       createdBy: 'test',
@@ -80,7 +80,7 @@ describe('createApiKey / rbacAuth', () => {
     expect(status).toHaveBeenCalledWith(401);
   });
 
-  it.skip('rejects revoked key', () => {
+  it('rejects revoked key', () => {
     const { rawKey, record } = createApiKey({ name: 'revoke-me', createdBy: 'test', scopes: ['quote:read'] });
     revokeApiKey(record.id);
 
@@ -93,7 +93,7 @@ describe('createApiKey / rbacAuth', () => {
     expect(status).toHaveBeenCalledWith(401);
   });
 
-  it.skip('rejects expired key', () => {
+  it('rejects expired key', () => {
     const { rawKey } = createApiKey({
       name: 'expired-key',
       createdBy: 'test',
@@ -110,7 +110,7 @@ describe('createApiKey / rbacAuth', () => {
     expect(status).toHaveBeenCalledWith(401);
   });
 
-  it.skip('accepts non-expired key', () => {
+  it('accepts non-expired key', () => {
     const { rawKey } = createApiKey({
       name: 'valid-expiry',
       createdBy: 'test',
@@ -126,7 +126,7 @@ describe('createApiKey / rbacAuth', () => {
     expect(next).toHaveBeenCalledOnce();
   });
 
-  it.skip('rejects IP not in whitelist', () => {
+  it('rejects IP not in whitelist', () => {
     const { rawKey } = createApiKey({
       name: 'ip-restricted',
       createdBy: 'test',
@@ -143,7 +143,7 @@ describe('createApiKey / rbacAuth', () => {
     expect(status).toHaveBeenCalledWith(403);
   });
 
-  it.skip('accepts IP within CIDR whitelist', () => {
+  it('accepts IP within CIDR whitelist', () => {
     const { rawKey } = createApiKey({
       name: 'ip-cidr',
       createdBy: 'test',
@@ -161,7 +161,7 @@ describe('createApiKey / rbacAuth', () => {
 });
 
 describe('requireScopes', () => {
-  it.skip('allows request when scopes match', () => {
+  it('allows request when scopes match', () => {
     const { rawKey } = createApiKey({ name: 'scoped', createdBy: 'test', scopes: ['fund:write', 'quote:read'] });
     const req = mockReq({ headers: { 'x-api-key': rawKey } });
     const { res } = mockRes();
@@ -174,7 +174,7 @@ describe('requireScopes', () => {
     expect(next).toHaveBeenCalledOnce();
   });
 
-  it.skip('rejects request when scope is missing', () => {
+  it('rejects request when scope is missing', () => {
     const { rawKey } = createApiKey({ name: 'readonly', createdBy: 'test', scopes: ['quote:read'] });
     const req = mockReq({ headers: { 'x-api-key': rawKey } });
     const { res } = mockRes();
@@ -189,14 +189,14 @@ describe('requireScopes', () => {
 });
 
 describe('listApiKeys / updateApiKey', () => {
-  it.skip('lists keys without exposing keyHash', () => {
+  it('lists keys without exposing keyHash', () => {
     createApiKey({ name: 'list-test', createdBy: 'test', scopes: ['status:read'] });
     const keys = listApiKeys();
     expect(keys.length).toBeGreaterThan(0);
     expect(keys[0]).not.toHaveProperty('keyHash');
   });
 
-  it.skip('updates key name and scopes', () => {
+  it('updates key name and scopes', () => {
     const { record } = createApiKey({ name: 'updatable', createdBy: 'test', scopes: ['status:read'] });
     const updated = updateApiKey(record.id, { name: 'updated-name', scopes: ['cex:read'] });
     expect(updated).toBe(true);
@@ -230,7 +230,7 @@ describe('seedLegacyKeys', () => {
 });
 
 describe('resolveRecord performance', () => {
-  it.skip('resolves keys in constant time regardless of store size', () => {
+  it('resolves keys in constant time regardless of store size', () => {
     // Create 1000 keys to simulate a large store
     const keys = [];
     for (let i = 0; i < 1000; i++) {

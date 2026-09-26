@@ -2209,14 +2209,16 @@ fn test_max_amount_default() {
 fn test_user_volume_default() {
     let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
     let user = Address::generate(&env);
-    assert_eq!(bridge.user_volume(&user), 0);
+    let token = Address::generate(&env);
+    assert_eq!(bridge.user_volume(&user, &token), 0);
 }
 
 #[test]
 fn test_rebate_for_default() {
     let (env, bridge, _admins) = setup_env_with_admins(1, 1, 100, 1000);
     let user = Address::generate(&env);
-    assert_eq!(bridge.rebate_for(&user), 0);
+    let token = Address::generate(&env);
+    assert_eq!(bridge.rebate_for(&user, &token), 0);
 }
 
 #[test]
@@ -2228,11 +2230,11 @@ fn test_set_rebate_tier_basic() {
         &1000,
     );
     bridge.execute(&pid);
-    assert_eq!(bridge.rebate_for(&Address::generate(&env)), 0);
-    assert_eq!(bridge.rebate_for(&admins.get_unchecked(0)), 0);
+    let token_addr = register_test_token(&env);
+    assert_eq!(bridge.rebate_for(&Address::generate(&env), &token_addr), 0);
+    assert_eq!(bridge.rebate_for(&admins.get_unchecked(0), &token_addr), 0);
     let user = Address::generate(&env);
     let target = Address::generate(&env);
-    let token_addr = register_test_token(&env);
     TestTokenClient::new(&env, &token_addr).mint(&user, &5000);
     bridge.fund_c_address(
         &user,
@@ -2241,7 +2243,7 @@ fn test_set_rebate_tier_basic() {
         &2000,
         &String::from_str(&env, "tier"),
     );
-    assert_eq!(bridge.rebate_for(&user), 100);
+    assert_eq!(bridge.rebate_for(&user, &token_addr), 100);
 }
 
 #[test]
@@ -2328,7 +2330,7 @@ fn test_set_rebate_tier_update_within_cap_still_allowed() {
         &2000,
         &String::from_str(&env, "tier"),
     );
-    assert_eq!(bridge.rebate_for(&user), 200);
+    assert_eq!(bridge.rebate_for(&user, &token_addr), 200);
 }
 
 #[test]
@@ -2354,7 +2356,7 @@ fn test_user_volume_tracks_funding() {
     let token_addr = register_test_token(&env);
     TestTokenClient::new(&env, &token_addr).mint(&source, &10_000);
 
-    assert_eq!(bridge.user_volume(&source), 0);
+    assert_eq!(bridge.user_volume(&source, &token_addr), 0);
     bridge.fund_c_address(
         &source,
         &target,
@@ -2362,7 +2364,7 @@ fn test_user_volume_tracks_funding() {
         &1000,
         &String::from_str(&env, "vol test"),
     );
-    assert_eq!(bridge.user_volume(&source), 1000);
+    assert_eq!(bridge.user_volume(&source, &token_addr), 1000);
     bridge.fund_c_address(
         &source,
         &target,
@@ -2370,7 +2372,19 @@ fn test_user_volume_tracks_funding() {
         &2000,
         &String::from_str(&env, "vol test2"),
     );
-    assert_eq!(bridge.user_volume(&source), 3000);
+    assert_eq!(bridge.user_volume(&source, &token_addr), 3000);
+
+    let other_token = register_test_token(&env);
+    TestTokenClient::new(&env, &other_token).mint(&source, &4000);
+    bridge.fund_c_address(
+        &source,
+        &target,
+        &other_token,
+        &4000,
+        &String::from_str(&env, "other token"),
+    );
+    assert_eq!(bridge.user_volume(&source, &token_addr), 3000);
+    assert_eq!(bridge.user_volume(&source, &other_token), 4000);
 }
 
 #[test]

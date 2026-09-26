@@ -208,12 +208,19 @@ export function rbacAuth(req: Request, res: Response, next: NextFunction): void 
 }
 
 export function getAuditLog(): typeof auditLog {
-  return [...auditLog];
+  // Copy each entry too: returning the stored objects would let callers
+  // rewrite recorded audit history.
+  return auditLog.map((entry) => ({ ...entry }));
 }
 
 export function seedLegacyKeys(rawKeys: string[]): void {
   const now = Date.now();
-  for (const rawKey of rawKeys) {
+  for (const entry of rawKeys) {
+    // API_KEYS="k1, k2" would otherwise seed " k2", which never matches a
+    // presented key; blank entries must not become valid keys either.
+    if (typeof entry !== 'string') continue;
+    const rawKey = entry.trim();
+    if (rawKey.length === 0) continue;
     const keyHash = hashKey(rawKey);
     if (keyHashIndex.has(keyHash)) continue;
 
